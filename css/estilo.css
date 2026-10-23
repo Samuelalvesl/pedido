@@ -116,3 +116,52 @@ label.marcar input{width:auto;margin:0}
 .status.recebido{background:var(--azul-100);color:var(--azul-800);border:1px solid var(--azul-400)}
 tr.linha-recebida td:first-child{box-shadow:inset 4px 0 0 var(--azul-400)}
 .btn:disabled[title]{cursor:not-allowed}
+
+/* ===== Calendário ===== */
+.calendario{border:1px solid var(--linha);border-radius:var(--raio);padding:.8rem;background:var(--branco)}
+.cal-topo{display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;color:var(--azul-900)}
+.cal-topo strong{font-size:1.05rem}
+.cal-semana,.cal-grade{display:grid;grid-template-columns:repeat(7,1fr);gap:.3rem}
+.cal-semana span{text-align:center;font-size:.75rem;font-weight:700;color:var(--azul-800);text-transform:uppercase;padding:.2rem 0}
+.dia{position:relative;aspect-ratio:1/1;min-height:2.4rem;border:1px solid var(--azul-200);border-radius:8px;background:var(--branco);color:var(--azul-900);font:inherit;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.dia.vazio{border:none;background:none;cursor:default}
+.dia.aberta:hover{background:var(--azul-100);border-color:var(--azul-400)}
+.dia.passada{background:#f1f4f9;color:#a9b4c4;border-color:#e6ebf2;cursor:not-allowed}
+.dia.encerrada{background:#fff6e6;color:#8a5300;border-color:#f3d29a}
+.dia.solicitado{background:var(--azul-100);border-color:var(--azul-400);color:var(--azul-800)}
+.dia.hoje{box-shadow:inset 0 0 0 2px var(--azul-600)}
+.dia.selecionado{background:var(--azul-700);border-color:var(--azul-700);color:var(--branco)}
+.marca-dia{position:absolute;top:2px;right:4px;font-size:.65rem}
+.cal-legenda{display:flex;gap:1rem;flex-wrap:wrap;margin-top:.7rem;font-size:.8rem;color:var(--texto-suave)}
+.cal-legenda span{display:flex;align-items:center;gap:.35rem}
+.leg{display:inline-block;width:.9rem;height:.9rem;border-radius:4px;border:1px solid var(--azul-200)}
+.leg.disponivel{background:var(--branco)}
+.leg.solicitado{background:var(--azul-100);border-color:var(--azul-400)}
+.leg.encerrada{background:#fff6e6;border-color:#f3d29a}
+
+/* ===== Retirada fixa ===== */
+.retirada-fixa{display:flex;flex-direction:column;gap:.1rem;background:var(--azul-100);border:1px solid var(--azul-200);border-left:4px solid var(--azul-700);border-radius:8px;padding:.7rem .9rem;margin-bottom:.9rem}
+.retirada-fixa .rotulo{font-weight:600;font-size:.9rem;color:var(--azul-900)}
+.retirada-fixa strong{font-size:1.25rem;color:var(--azul-800)}
+.retirada-fixa .small{color:var(--texto-suave)}
+
+/* ===== Solicitações agrupadas por data ===== */
+.filtro-data{display:flex;gap:.6rem;align-items:flex-end;flex-wrap:wrap;margin-bottom:.4rem}
+.filtro-data label{flex:1;min-width:220px;max-width:420px;margin-bottom:.6rem}
+.filtro-data .btn{margin-bottom:.6rem}
+tr.grupo-data td{background:var(--azul-800);color:var(--branco);padding:.6rem .7rem}
+tr.grupo-data:hover td{background:var(--azul-800)}
+.grupo-titulo{font-weight:700;display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
+.grupo-info{font-weight:500;color:var(--azul-200);font-size:.85rem}
+.grupo-itens{font-size:.85rem;color:var(--azul-100);margin-top:.2rem}
+.grupo-itens strong{color:var(--branco)}
+
+/* ===== Fornecimento e Registro de Alterações na Quantidade ===== */
+.card.fornecimento{border-top-width:5px;border-color:var(--azul-400);border-top-color:var(--azul-700);background:linear-gradient(180deg,var(--azul-50),var(--branco) 140px)}
+.card.fornecimento input[data-just]{margin-top:0;min-width:180px}
+.registro table{font-size:.86rem}
+.registro thead th{background:#fff3dc;color:#8a5300}
+.registro-vazio{margin:.2rem 0 0}
+tr.linha-registro td{background:#fffaf0;border-bottom:1px solid #f3d29a;padding:.5rem .7rem .8rem}
+tr.linha-registro:hover td{background:#fffaf0}
+.registro-titulo{font-weight:700;font-size:.85rem;color:#8a5300;margin-bottom:.3rem}

@@ -1,5 +1,5 @@
 /*
- * Catanho — distribuição de catanhos para atletas
+ * PEDIDO — distribuição de pedidos para atletas
  * Autenticação: Firebase Authentication (e-mail e senha)
  * Banco de dados: Cloud Firestore
  *
@@ -67,9 +67,12 @@
   let mensagemLogin = '';
   let dados = vazio();
   let filtroSolicitacoes = 'todas';
-  // Quem está usando o painel de solicitações (Administrador ou Catanheiro).
+  let filtroData = 'todas';   // data da retirada selecionada no painel de solicitações
+  // Quem está usando o painel de solicitações (Administrador ou Paioleiro).
   const CTX_ADMIN = { papel: 'admin', recarregar: msg => telaAdmin('solicitacoes', msg, true) };
-  const CTX_CATANHEIRO = { papel: 'catanheiro', recarregar: msg => telaCatanheiro(msg) };
+  const CTX_PAIOLEIRO = { papel: 'paioleiro', recarregar: msg => telaPaioleiro(msg) };
+  // Perfil "paioleiro" (o valor antigo "catanheiro" continua aceito para acessos já criados).
+  const ehPerfilPaioleiro = u => !!u && (u.perfil === 'paioleiro' || u.perfil === 'catanheiro');
   let ctxSol = CTX_ADMIN;
 
   function vazio() {
@@ -92,7 +95,35 @@
   }
   const ms = ts => (ts && ts.toMillis) ? ts.toMillis() : 0;
   const plural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
-  const catanhos = n => plural(n, 'catanho', 'catanhos');
+  const pedidos = n => plural(n, 'pedido', 'pedidos');
+
+  // ---------- Datas, prazo e retirada (horário de Brasília, GMT-3, sem horário de verão) ----------
+  const FUSO_BRASILIA_MS = 3 * 60 * 60 * 1000;
+  const HORA_LIMITE = 9, MINUTO_LIMITE = 30;  // solicitações até 9h30 do próprio dia da retirada
+  const PRAZO_TEXTO = '9h30';
+  const HORARIO_RETIRADA = '10:00 às 11:00';   // valor gravado na solicitação
+  const RETIRADA_TEXTO = '10h às 11h';         // como é exibido
+  const NOMES_MESES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+  const NOMES_DIAS = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+  const isoData = (a, m, d) => `${a}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  function hojeISO() {
+    const b = new Date(Date.now() - FUSO_BRASILIA_MS); // campos UTC = horário de Brasília
+    return isoData(b.getUTCFullYear(), b.getUTCMonth() + 1, b.getUTCDate());
+  }
+  // Instante (UTC) em que encerra o prazo da data: 9h30 de Brasília = 12h30 UTC.
+  function prazoDaData(dt) {
+    const [a, m, d] = dt.split('-').map(Number);
+    return Date.UTC(a, m - 1, d, HORA_LIMITE, MINUTO_LIMITE) + FUSO_BRASILIA_MS;
+  }
+  function situacaoData(dt) {
+    if (!dt || dt < hojeISO()) return 'passada';
+    return Date.now() >= prazoDaData(dt) ? 'encerrada' : 'aberta';
+  }
+  function fmtDataSemana(dt) {
+    if (!dt) return '—';
+    const [a, m, d] = dt.split('-').map(Number);
+    return `${fmtData(dt)} (${NOMES_DIAS[new Date(Date.UTC(a, m - 1, d)).getUTCDay()]})`;
+  }
 
   function msgErro(e) {
     const c = (e && e.code) || '';
@@ -147,17 +178,42 @@
   const estoqueBaixado = s => baixaNoFornecimento(s) ? statusDe(s) === 'fornecido' : true;
   const dataDaBaixa = s => baixaNoFornecimento(s) ? s.fornecidoEm : s.criadoEm;
 
-  const nomeEvento = ev => ev ? `${ev.nome} (${fmtData(ev.data)})` : '—';
-  const eventosOrdenados = () => dados.eventos.slice().sort((a, b) => (a.data || '').localeCompare(b.data || '') || a.nome.localeCompare(b.nome));
+  // Data da retirada. Solicitações antigas (anteriores ao calendário) usam a data do evento.
+  const dataDe = s => s.data || evento(s.eventoId)?.data || '';
   const itensOrdenados = () => dados.itens.slice().sort((a, b) => a.nome.localeCompare(b.nome));
   const ordenarModalidades = l => l.slice().sort((a, b) => (a.ordem || 0) - (b.ordem || 0) || a.nome.localeCompare(b.nome));
   const itensDaSolicitacao = s => Object.entries(s.itens || {}).map(([id, v]) => ({ id, ...v })).sort((a, b) => a.nome.localeCompare(b.nome));
 
+  // Quantidade efetivamente fornecida de um item (quando a solicitação já foi fornecida).
+  const qtdFornecida = (s, i) => (s.fornecidos && s.fornecidos[i.id] != null) ? s.fornecidos[i.id] : i.quantidade;
+  const textoRetirada = s => s.data ? RETIRADA_TEXTO : (s.horarioRetirada || '—');
   function listaItensHtml(s) {
     const l = itensDaSolicitacao(s);
     if (!l.length) return '<span class="muted">—</span>';
-    return `<ul class="lista-itens">${l.map(i => `<li>${esc(i.nome)}: <strong>${esc(qtdUn(i.quantidade, i.unidade))}</strong></li>`).join('')}</ul>`;
+    return `<ul class="lista-itens">${l.map(i => {
+      const f = qtdFornecida(s, i);
+      return s.fornecidos && f !== i.quantidade
+        ? `<li>${esc(i.nome)}: <strong>${esc(qtdUn(f, i.unidade))}</strong> <span class="muted">(aprovado ${esc(qtdUn(i.quantidade, i.unidade))})</span></li>`
+        : `<li>${esc(i.nome)}: <strong>${esc(qtdUn(i.quantidade, i.unidade))}</strong></li>`;
+    }).join('')}</ul>`;
   }
+  // "Registro de Alterações na Quantidade": somente itens com redução.
+  function tabelaRegistro(alteracoes, porNome, quando) {
+    const l = Object.values(alteracoes || {}).sort((a, b) => a.nome.localeCompare(b.nome));
+    if (!l.length) return '<p class="muted small registro-vazio">Nenhuma alteração: quantidade fornecida igual à aprovada.</p>';
+    return `<div class="tabela-wrap registro"><table>
+      <thead><tr><th>Item</th><th class="num">Aprovada</th><th class="num">Fornecida</th><th class="num">Diferença</th><th>Paioleiro</th><th>Data e horário</th><th>Justificativa</th></tr></thead>
+      <tbody>${l.map(r => `<tr>
+        <td>${esc(r.nome)}</td>
+        <td class="num">${esc(qtdUn(r.aprovada, r.unidade))}</td>
+        <td class="num">${esc(qtdUn(r.fornecida, r.unidade))}</td>
+        <td class="num"><strong>−${esc(qtdUn(r.diferenca, r.unidade))}</strong></td>
+        <td>${esc(porNome || '—')}</td>
+        <td>${esc(quando)}</td>
+        <td>${r.justificativa ? esc(r.justificativa) : '<span class="muted">não informada</span>'}</td>
+      </tr>`).join('')}</tbody></table></div>`;
+  }
+  const temAlteracoes = s => !!s.alteracoes && Object.keys(s.alteracoes).length > 0;
   function seloStatus(s) {
     return {
       pendente: '<span class="status pendente">● Pendente</span>',
@@ -177,6 +233,9 @@
   async function sair(mensagem) {
     mensagemLogin = mensagem || '';
     dados = vazio();
+    mesCalendario = null;   // o calendário volta ao mês atual no próximo acesso
+    dataSelecionada = null;
+    filtroData = 'todas';
     await signOut(auth);
   }
 
@@ -189,7 +248,7 @@
       if (!s.exists()) return sair('Seu acesso ainda não foi configurado. Procure o Administrador.');
       perfil = { uid: user.uid, ...s.data() };
       if (perfil.perfil === 'admin') { filtroSolicitacoes = 'todas'; ctxSol = CTX_ADMIN; return telaAdmin('solicitacoes', '', true); }
-      if (perfil.perfil === 'catanheiro') { filtroSolicitacoes = 'recebidos'; ctxSol = CTX_CATANHEIRO; return telaCatanheiro(); }
+      if (ehPerfilPaioleiro(perfil)) { filtroSolicitacoes = 'recebidos'; ctxSol = CTX_PAIOLEIRO; return telaPaioleiro(); }
       if (perfil.perfil === 'responsavel' && perfil.modalidadeId) return telaResponsavel();
       return sair('Usuário sem modalidade vinculada. Procure o Administrador.');
     } catch (e) {
@@ -199,7 +258,7 @@
 
   function cabecalho(sub, comAtualizar) {
     return `<header class="topo">
-      <div><strong>Catanho</strong> <span class="sub">· ${esc(sub)}</span></div>
+      <div><strong>PEDIDO</strong> <span class="sub">· ${esc(sub)}</span></div>
       <div class="topo-dir">
         <span>${esc(perfil.nome)}</span>
         ${comAtualizar ? '<button class="btn claro pequeno" id="btnAtualizar">Atualizar</button>' : ''}
@@ -225,9 +284,9 @@
     app.innerHTML = `
     <div class="login-wrap">
       <form class="card login" id="fLogin" novalidate>
-        <span class="marca">Catanho</span>
+        <span class="marca">PEDIDO</span>
         <h1>Acesso ao sistema</h1>
-        <p class="muted" style="margin-top:-.3rem;margin-bottom:1.2rem">Distribuição de catanhos para atletas</p>
+        <p class="muted" style="margin-top:-.3rem;margin-bottom:1.2rem">Distribuição de pedidos para atletas</p>
         <label>Usuário/e-mail<input type="email" name="email" autocomplete="username" placeholder="seu@email.com"></label>
         <label>Senha<input type="password" name="senha" autocomplete="current-password"></label>
         <div class="erro" id="erroLogin">${esc(msg)}</div>
@@ -248,13 +307,17 @@
   }
 
   /* ================= Responsável ================= */
+  let mesCalendario = null;   // { ano, mes (1-12) } exibido no calendário
+  let dataSelecionada = null; // 'AAAA-MM-DD'
+
   async function telaResponsavel(mensagem) {
     app.innerHTML = CARREGANDO;
     let mod;
     try {
       const [mSnap, eventos, itens, solicitacoes] = await Promise.all([
         getDoc(doc(db, 'modalidades', perfil.modalidadeId)),
-        listaConsulta(query(collection(db, 'eventos'), where('modalidadeId', '==', perfil.modalidadeId))),
+        // Eventos: apenas para exibir a data de solicitações antigas (anteriores ao calendário).
+        listaConsulta(query(collection(db, 'eventos'), where('modalidadeId', '==', perfil.modalidadeId))).catch(() => []),
         lista('itens'),
         listaConsulta(query(collection(db, 'solicitacoes'), where('modalidadeId', '==', perfil.modalidadeId)))
       ]);
@@ -262,45 +325,112 @@
       mod = { id: mSnap.id, ...mSnap.data() };
       dados = { ...vazio(), modalidades: [mod], eventos, itens, solicitacoes };
     } catch (e) {
-      return telaFalha('Solicitação de catanhos', e, () => telaResponsavel());
+      return telaFalha('Solicitação de pedidos', e, () => telaResponsavel());
     }
 
-    const minhas = dados.solicitacoes.slice().sort((a, b) => ms(b.criadoEm) - ms(a.criadoEm));
-    app.innerHTML = cabecalho('Solicitação de catanhos') + `
+    const minhas = dados.solicitacoes.slice().sort((a, b) => dataDe(b).localeCompare(dataDe(a)) || ms(b.criadoEm) - ms(a.criadoEm));
+    app.innerHTML = cabecalho('Solicitação de pedidos') + `
     <main class="conteudo estreito">
       ${mensagem ? `<div class="aviso">${esc(mensagem)}</div>` : ''}
-      <section class="card" id="secSolicitacao"></section>
+      <section class="card" id="secCalendario"></section>
+      <section class="card" id="secSolicitacao" hidden></section>
       <section class="card">
         <h2>Solicitações da modalidade</h2>
         ${minhas.length ? `<div class="tabela-wrap"><table>
-          <thead><tr><th>Registrada em</th><th>Evento</th><th>Retirada</th><th class="num">Catanhos</th><th>Itens</th><th>Status</th></tr></thead>
+          <thead><tr><th>Data da retirada</th><th>Retirada</th><th class="num">Quantidade</th><th>Itens</th><th>Status</th><th>Registrada em</th></tr></thead>
           <tbody>${minhas.map(s => `<tr class="${classeLinha(s)}">
-            <td>${fmtDataHora(s.criadoEm)}</td>
-            <td>${esc(nomeEvento(evento(s.eventoId)))}</td>
-            <td>${esc(s.horarioRetirada || '—')}</td>
+            <td><strong>${esc(fmtDataSemana(dataDe(s)))}</strong></td>
+            <td>${esc(textoRetirada(s))}</td>
             <td class="num">${fmtQtd(s.quantidade)}</td>
             <td>${listaItensHtml(s)}</td>
             <td>${seloStatus(s)}</td>
+            <td>${fmtDataHora(s.criadoEm)}</td>
           </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhuma solicitação registrada.</p>'}
       </section>
     </main>`;
     ligarSair();
-    formularioSolicitacao(mod);
+    if (!mesCalendario) { const h = hojeISO(); mesCalendario = { ano: +h.slice(0, 4), mes: +h.slice(5, 7) }; }
+    dataSelecionada = null;
+    desenharCalendario(mod);
   }
 
   function msgLimiteModalidade(m) {
     return m.limite == null
-      ? 'O limite de catanhos desta modalidade ainda não foi definido pelo Administrador.'
-      : `Quantidade máxima permitida para esta modalidade: ${catanhos(m.limite)}.`;
+      ? 'O limite de pedidos desta modalidade ainda não foi definido pelo Administrador.'
+      : `Quantidade máxima permitida para esta modalidade: ${pedidos(m.limite)}.`;
+  }
+  const msgPrazoEncerrado = dt => `O prazo para solicitar para ${fmtData(dt)} encerrou às ${PRAZO_TEXTO} (horário de Brasília). Não é mais possível solicitar para esta data.`;
+  const MSG_DATA_PASSADA = 'Não é possível solicitar para datas anteriores a hoje.';
+  const MSG_DUPLICADA = 'Já existe uma solicitação da sua modalidade para esta data. É permitida apenas uma solicitação por data.';
+
+  // ---------- Calendário ----------
+  function desenharCalendario(mod, aviso) {
+    const { ano, mes } = mesCalendario;
+    const hoje = hojeISO();
+    const mesAtual = hoje.slice(0, 7) === `${ano}-${String(mes).padStart(2, '0')}`;
+    const primeiroDiaSemana = new Date(Date.UTC(ano, mes - 1, 1)).getUTCDay();
+    const diasNoMes = new Date(Date.UTC(ano, mes, 0)).getUTCDate();
+    const jaPedido = dt => dados.solicitacoes.some(s => dataDe(s) === dt);
+
+    let celulas = '';
+    for (let i = 0; i < primeiroDiaSemana; i++) celulas += '<div class="dia vazio"></div>';
+    for (let dia = 1; dia <= diasNoMes; dia++) {
+      const dt = isoData(ano, mes, dia);
+      const sit = situacaoData(dt);
+      const pedido = jaPedido(dt);
+      const classes = ['dia', sit, dt === hoje ? 'hoje' : '', pedido ? 'solicitado' : '', dt === dataSelecionada ? 'selecionado' : ''].join(' ');
+      const titulo = sit === 'passada' ? 'Data anterior a hoje'
+        : sit === 'encerrada' ? `Prazo encerrado (${PRAZO_TEXTO})`
+        : pedido ? 'Já solicitado' : 'Disponível';
+      celulas += `<button type="button" class="${classes}" data-dia="${dt}" ${sit === 'passada' ? 'disabled' : ''} title="${titulo}" aria-label="${fmtData(dt)}: ${titulo}">
+        <span class="num-dia">${dia}</span>${pedido ? '<span class="marca-dia">✓</span>' : sit === 'encerrada' ? '<span class="marca-dia">⏱</span>' : ''}
+      </button>`;
+    }
+
+    $('secCalendario').innerHTML = `
+      <h2>Escolha a data da retirada</h2>
+      <p class="muted small" style="margin-top:-.3rem">Solicitações até as <strong>${PRAZO_TEXTO} do próprio dia</strong> da retirada (horário de Brasília). Retirada sempre das <strong>${RETIRADA_TEXTO}</strong>.</p>
+      <div class="calendario">
+        <div class="cal-topo">
+          <button type="button" class="btn secundario pequeno" id="calAnt" ${mesAtual ? 'disabled' : ''} aria-label="Mês anterior">‹</button>
+          <strong>${NOMES_MESES[mes - 1]} de ${ano}</strong>
+          <button type="button" class="btn secundario pequeno" id="calProx" aria-label="Próximo mês">›</button>
+        </div>
+        <div class="cal-semana">${['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map(d => `<span>${d}</span>`).join('')}</div>
+        <div class="cal-grade">${celulas}</div>
+        <div class="cal-legenda">
+          <span><i class="leg disponivel"></i>Disponível</span>
+          <span><i class="leg solicitado"></i>Já solicitado</span>
+          <span><i class="leg encerrada"></i>Prazo encerrado</span>
+        </div>
+      </div>
+      <div class="erro" id="erroCal" style="margin-top:.8rem">${esc(aviso || '')}</div>`;
+
+    $('calAnt').onclick = () => { mesCalendario = mes === 1 ? { ano: ano - 1, mes: 12 } : { ano, mes: mes - 1 }; desenharCalendario(mod); };
+    $('calProx').onclick = () => { mesCalendario = mes === 12 ? { ano: ano + 1, mes: 1 } : { ano, mes: mes + 1 }; desenharCalendario(mod); };
+    document.querySelectorAll('[data-dia]').forEach(b => b.onclick = () => {
+      const dt = b.dataset.dia;
+      const sit = situacaoData(dt);
+      if (sit === 'passada') return desenharCalendario(mod, MSG_DATA_PASSADA);
+      if (sit === 'encerrada') { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, msgPrazoEncerrado(dt)); }
+      if (jaPedido(dt)) { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, MSG_DUPLICADA); }
+      dataSelecionada = dt;
+      desenharCalendario(mod);
+      formularioSolicitacao(mod, { data: dt });
+      $('secSolicitacao').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    });
   }
 
   // Validação usada no formulário e novamente antes de gravar (com dados atualizados).
-  // Cada item marcado recebe a mesma quantidade de catanhos solicitada.
-  // A baixa no estoque só ocorre quando o Administrador marca o pedido como "Fornecido".
+  // Cada item marcado recebe a mesma quantidade solicitada.
+  // A baixa no estoque só ocorre quando o pedido é marcado como "Fornecido".
   function validarSolicitacao(mod, d, catalogo) {
     const erros = [], itens = [];
+    const sit = situacaoData(d.data);
+    if (sit === 'passada') erros.push(MSG_DATA_PASSADA);
+    if (sit === 'encerrada') erros.push(msgPrazoEncerrado(d.data));
     if (mod.limite == null || d.quantidade > mod.limite) erros.push(msgLimiteModalidade(mod));
-    if (!d.itemIds.length) erros.push('Selecione pelo menos um item para compor o catanho.');
+    if (!d.itemIds.length) erros.push('Selecione pelo menos um item para compor o pedido.');
     if (d.itemIds.length > MAX_ITENS_POR_SOLICITACAO) erros.push(`Selecione no máximo ${MAX_ITENS_POR_SOLICITACAO} itens por solicitação.`);
     for (const id of d.itemIds) {
       const atual = catalogo.find(c => c.id === id);
@@ -313,39 +443,32 @@
     return { erros, itens };
   }
 
-  function formularioSolicitacao(mod, valores = {}) {
-    const eventos = eventosOrdenados();
-    const jaPedido = id => dados.solicitacoes.some(s => s.eventoId === id);
-    const livres = eventos.filter(ev => !jaPedido(ev.id));
+  function formularioSolicitacao(mod, valores) {
     const disponiveis = itensOrdenados().filter(i => i.ativo);
     const marcado = id => (valores.itemIds || []).includes(id);
-
-    $('secSolicitacao').innerHTML = `
-      <h2>Solicitação de catanhos</h2>
+    const sec = $('secSolicitacao');
+    sec.hidden = false;
+    sec.innerHTML = `
+      <h2>Solicitação de pedidos</h2>
       <form id="fSol" novalidate>
         <label>Modalidade<input value="${esc(mod.nome)}" readonly></label>
-        <label>Evento
-          <select id="selEvento">
-            <option value="">${!eventos.length ? 'Nenhum evento cadastrado para sua modalidade' : livres.length ? 'Selecione o evento' : 'Todos os eventos já possuem solicitação'}</option>
-            ${eventos.map(ev => jaPedido(ev.id)
-              ? `<option value="${ev.id}" disabled>${esc(nomeEvento(ev))} — já solicitado</option>`
-              : `<option value="${ev.id}" ${ev.id === valores.eventoId ? 'selected' : ''}>${esc(nomeEvento(ev))}</option>`).join('')}
-          </select>
-        </label>
-        <p class="muted small" style="margin-top:-.5rem">É permitida apenas uma solicitação por evento.</p>
-        <label>Horário de retirada do catanho
-          <input type="time" id="inpHora" value="${esc(valores.horario)}">
-        </label>
-        <label>Quantidade de catanhos
+        <label>Data da retirada<input id="inpData" value="${esc(fmtDataSemana(valores.data))}" readonly></label>
+        <div class="retirada-fixa">
+          <span class="rotulo">Horário de retirada</span>
+          <strong>${RETIRADA_TEXTO}</strong>
+          <span class="small">Horário fixo para todas as solicitações.</span>
+        </div>
+        <p class="muted small" style="margin-top:-.3rem">Prazo para enviar: até as ${PRAZO_TEXTO} de ${esc(fmtData(valores.data))} (horário de Brasília). É permitida apenas uma solicitação por data.</p>
+        <label>Quantidade
           <input type="number" id="inpQtd" min="1" step="1" inputmode="numeric" value="${editavel(valores.quantidade)}">
         </label>
         <p class="muted small" style="margin-top:-.5rem">
-          ${mod.limite != null ? `Limite da modalidade: ${catanhos(mod.limite)}.` : 'Limite da modalidade ainda não definido pelo Administrador.'}
+          ${mod.limite != null ? `Limite da modalidade: ${pedidos(mod.limite)}.` : 'Limite da modalidade ainda não definido pelo Administrador.'}
         </p>
 
-        <h3 style="font-size:1rem;margin-top:1rem">Itens do catanho</h3>
+        <h3 style="font-size:1rem;margin-top:1rem">Itens do pedido</h3>
         ${disponiveis.length ? `
-        <p class="muted small" style="margin-top:-.3rem">Marque os itens que vão compor o catanho (até ${MAX_ITENS_POR_SOLICITACAO} itens). Cada item marcado terá a mesma quantidade de catanhos solicitada.</p>
+        <p class="muted small" style="margin-top:-.3rem">Marque os itens que vão compor o pedido (até ${MAX_ITENS_POR_SOLICITACAO} itens). Cada item marcado terá a mesma quantidade solicitada.</p>
         <div class="tabela-wrap itens-sol"><table>
           <thead><tr><th style="width:2.5rem"></th><th>Item</th><th>Unidade</th></tr></thead>
           <tbody>${disponiveis.map(i => {
@@ -358,22 +481,21 @@
           }).join('')}</tbody></table></div>` : '<p class="muted">Nenhum item disponível no momento.</p>'}
 
         <div class="erro" id="erroSol" style="margin-top:1rem"></div>
-        <button class="btn primario" type="submit">Continuar</button>
+        <div class="acoes">
+          <button class="btn primario" type="submit">Continuar</button>
+          <button class="btn secundario" type="button" id="btnTrocarData">Escolher outra data</button>
+        </div>
       </form>`;
 
+    $('btnTrocarData').onclick = () => { dataSelecionada = null; sec.hidden = true; desenharCalendario(mod); };
     $('fSol').onsubmit = e => {
       e.preventDefault();
       const erro = msg => { $('erroSol').textContent = msg; };
-      const eventoId = $('selEvento').value;
-      const horario = $('inpHora').value;
       const quantidade = paraInteiro($('inpQtd').value);
-      if (!eventoId) return erro('Selecione o evento.');
-      if (jaPedido(eventoId)) return erro('Já existe uma solicitação da sua modalidade para este evento. É permitida apenas uma solicitação por evento.');
-      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(horario)) return erro('Informe o horário de retirada do catanho.');
-      if (quantidade == null || Number.isNaN(quantidade) || quantidade < 1) return erro('Informe uma quantidade de catanhos válida (número inteiro maior que zero).');
-
+      if (dados.solicitacoes.some(s => dataDe(s) === valores.data)) return erro(MSG_DUPLICADA);
+      if (quantidade == null || Number.isNaN(quantidade) || quantidade < 1) return erro('Informe uma quantidade válida (número inteiro maior que zero).');
       const itemIds = [...document.querySelectorAll('[data-item]:checked')].map(c => c.dataset.item);
-      const d = { eventoId, horario, quantidade, itemIds };
+      const d = { data: valores.data, quantidade, itemIds };
       const { erros, itens } = validarSolicitacao(mod, d, dados.itens);
       if (erros.length) return erro(erros.join('\n'));
       d.itens = itens;
@@ -382,19 +504,18 @@
   }
 
   function resumoSolicitacao(mod, d) {
-    // Identificador fixo "modalidade_evento": só pode existir uma solicitação por
-    // evento para cada modalidade. Uma segunda gravação (ou uma confirmação repetida)
-    // é recusada pelo Firestore, e o estoque não é baixado duas vezes.
-    const solRef = doc(db, 'solicitacoes', `${mod.id}_${d.eventoId}`);
-    const MSG_DUPLICADA = 'Já existe uma solicitação da sua modalidade para este evento. É permitida apenas uma solicitação por evento.';
+    // Identificador fixo "modalidade_data": só pode existir uma solicitação por
+    // data para cada modalidade. Uma segunda gravação (ou uma confirmação repetida)
+    // é recusada pelo Firestore.
+    const solRef = doc(db, 'solicitacoes', `${mod.id}_${d.data}`);
     $('secSolicitacao').innerHTML = `
       <h2>Resumo da solicitação</h2>
       <p class="muted">Confira os dados antes de confirmar.</p>
       <dl class="resumo">
         <dt>Modalidade</dt><dd>${esc(mod.nome)}</dd>
-        <dt>Evento</dt><dd>${esc(nomeEvento(evento(d.eventoId)))}</dd>
-        <dt>Horário de retirada</dt><dd>${esc(d.horario)}</dd>
-        <dt>Quantidade de catanhos</dt><dd>${fmtQtd(d.quantidade)}</dd>
+        <dt>Data da retirada</dt><dd>${esc(fmtDataSemana(d.data))}</dd>
+        <dt>Horário de retirada</dt><dd>${RETIRADA_TEXTO}</dd>
+        <dt>Quantidade</dt><dd>${fmtQtd(d.quantidade)}</dd>
         <dt>Itens</dt><dd>${d.itens.map(i => `${esc(i.nome)}: ${esc(qtdUn(i.quantidade, i.unidade))}`).join('<br>')}</dd>
       </dl>
       <div class="erro" id="erroConf"></div>
@@ -405,6 +526,8 @@
     $('btnVoltar').onclick = () => formularioSolicitacao(mod, d);
     $('btnConfirmar').onclick = () => comBotao($('btnConfirmar'), async () => {
       const erro = msg => { $('erroConf').textContent = msg; };
+      // Prazo conferido de novo no momento da confirmação.
+      if (situacaoData(d.data) !== 'aberta') return erro(situacaoData(d.data) === 'passada' ? MSG_DATA_PASSADA : msgPrazoEncerrado(d.data));
       try {
         if ((await getDoc(solRef)).exists()) return erro(MSG_DUPLICADA);
       } catch (e) { return erro(msgErro(e)); }
@@ -422,11 +545,11 @@
         const itensMap = {};
         itens.forEach(i => { itensMap[i.id] = { nome: i.nome, unidade: i.unidade, quantidade: i.quantidade }; });
 
-        // O pedido não mexe no estoque: a baixa é feita no "Fornecido".
+        // A solicitação não mexe no estoque: a baixa é feita no "Fornecido".
         await setDoc(solRef, {
           modalidadeId: mod.id,
-          eventoId: d.eventoId,
-          horarioRetirada: d.horario,
+          data: d.data,
+          horarioRetirada: HORARIO_RETIRADA,
           quantidade: d.quantidade,
           itens: itensMap,
           usuarioId: perfil.uid,
@@ -443,8 +566,9 @@
           const ja = await getDoc(solRef);
           if (ja.exists()) return telaResponsavel('Solicitação registrada com sucesso.');
         } catch (_) { /* não existe ou sem acesso */ }
+        if (e.code === 'permission-denied' && situacaoData(d.data) !== 'aberta') return erro(msgPrazoEncerrado(d.data));
         erro(e.code === 'permission-denied'
-          ? 'Não foi possível registrar: o estoque ou os limites foram alterados. Volte e revise a solicitação.'
+          ? 'Não foi possível registrar: o prazo, o estoque ou os limites foram alterados. Volte e revise a solicitação.'
           : msgErro(e));
       }
     });
@@ -456,8 +580,7 @@
     ['itens', 'Itens e estoque'],
     ['modalidades', 'Modalidades e limites'],
     ['responsaveis', 'Responsáveis'],
-    ['catanheiros', 'Catanheiros'],
-    ['eventos', 'Eventos']
+    ['paioleiros', 'Paioleiros']
   ];
 
   async function garantirModalidades() {
@@ -476,7 +599,7 @@
       app.innerHTML = CARREGANDO;
       try {
         const [modalidades, eventos, usuarios, solicitacoes, itens, movimentos] = await Promise.all([
-          garantirModalidades(), lista('eventos'), lista('usuarios'), lista('solicitacoes'), lista('itens'), lista('movimentos')
+          garantirModalidades(), lista('eventos').catch(() => []), lista('usuarios'), lista('solicitacoes'), lista('itens'), lista('movimentos')
         ]);
         dados = { modalidades, eventos, usuarios, solicitacoes, itens, movimentos };
       } catch (e) {
@@ -510,27 +633,27 @@
     }
   }
 
-  /* ================= Catanheiro ================= */
+  /* ================= Paioleiro ================= */
   // Vê apenas solicitações autorizadas ("Pedido Recebido") e as já fornecidas,
   // e só pode marcar "Fornecido" (com baixa no estoque).
-  async function telaCatanheiro(mensagem) {
+  async function telaPaioleiro(mensagem) {
     app.innerHTML = CARREGANDO;
     try {
       const [modalidades, eventos, solicitacoes] = await Promise.all([
-        lista('modalidades'), lista('eventos'),
+        lista('modalidades'), lista('eventos').catch(() => []),
         listaConsulta(query(collection(db, 'solicitacoes'), where('status', 'in', ['recebido', 'fornecido'])))
       ]);
       dados = { ...vazio(), modalidades: ordenarModalidades(modalidades), eventos, solicitacoes };
     } catch (e) {
-      return telaFalha('Catanheiro', e, () => telaCatanheiro());
+      return telaFalha('Paioleiro', e, () => telaPaioleiro());
     }
-    app.innerHTML = cabecalho('Catanheiro', true) + `
+    app.innerHTML = cabecalho('Paioleiro', true) + `
       <main class="conteudo">
         ${mensagem ? `<div class="aviso">${esc(mensagem)}</div>` : ''}
         <div id="painel"></div>
       </main>`;
     ligarSair();
-    $('btnAtualizar').onclick = () => telaCatanheiro();
+    $('btnAtualizar').onclick = () => telaPaioleiro();
     PAINEIS.solicitacoes($('painel'));
   }
 
@@ -540,19 +663,29 @@
   const PAINEIS = {
     /* ---- Solicitações ---- */
     solicitacoes(p) {
-      const todas = dados.solicitacoes.slice().sort((a, b) => ms(b.criadoEm) - ms(a.criadoEm));
-      const grupo = g => todas.filter(s => grupoDe(s) === g);
-      const pend = grupo('pendentes'), rec = grupo('recebidos'), forn = grupo('fornecidos');
+      const paioleiro = ctxSol.papel === 'paioleiro';
+      const hoje = hojeISO();
+      const todas = dados.solicitacoes.slice();
+      const grupo = (g, l = todas) => l.filter(s => grupoDe(s) === g);
       const soma = l => l.reduce((t, s) => t + (s.quantidade || 0), 0);
-      const visiveis = filtroSolicitacoes === 'todas' ? todas : grupo(filtroSolicitacoes);
+      // Datas que possuem solicitações: próximas primeiro (da mais próxima para a mais distante), depois as passadas.
+      const ordemDatas = (x, y) => {
+        const fx = x >= hoje, fy = y >= hoje;
+        if (fx !== fy) return fx ? -1 : 1;
+        return fx ? x.localeCompare(y) : y.localeCompare(x);
+      };
+      const datas = [...new Set(todas.map(dataDe))].sort(ordemDatas);
+      if (filtroData && filtroData !== 'todas' && !datas.includes(filtroData) && filtroData !== hoje) filtroData = 'todas';
+      const naData = filtroData && filtroData !== 'todas' ? todas.filter(s => dataDe(s) === filtroData) : todas;
+      const pend = grupo('pendentes', naData), rec = grupo('recebidos', naData), forn = grupo('fornecidos', naData);
+      const visiveis = filtroSolicitacoes === 'todas' ? naData : grupo(filtroSolicitacoes, naData);
       const indicador = (rotulo, l, destaque) => `<div class="indicador ${destaque ? 'destaque' : ''}">
         <div class="rotulo">${rotulo}</div><div class="valor">${fmtQtd(soma(l))}</div>
         <div class="small ${destaque ? '' : 'muted'}" ${destaque ? 'style="color:var(--azul-200)"' : ''}>${plural(l.length, 'solicitação', 'solicitações')}</div></div>`;
 
-      const catanheiro = ctxSol.papel === 'catanheiro';
       const acoes = s => {
         const st = statusDe(s);
-        if (st === 'pendente' && !catanheiro)
+        if (st === 'pendente' && !paioleiro)
           return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-receber="${s.id}">Pedido Recebido</button></div>`;
         if (st === 'recebido')
           return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-fornecer="${s.id}">✓ Fornecido</button></div>`;
@@ -561,44 +694,81 @@
         return '';
       };
 
+      // Itens a preparar na data: soma dos itens das solicitações ainda não fornecidas.
+      function itensAPreparar(l) {
+        const tot = {};
+        l.filter(s => grupoDe(s) !== 'fornecidos').forEach(s => itensDaSolicitacao(s).forEach(i => {
+          tot[i.nome] = tot[i.nome] || { q: 0, un: i.unidade };
+          tot[i.nome].q += i.quantidade;
+        }));
+        const e = Object.entries(tot).sort((x, y) => x[0].localeCompare(y[0]));
+        return e.length ? e.map(([n, v]) => `${esc(n)}: <strong>${esc(qtdUn(v.q, v.un))}</strong>`).join(' · ') : 'tudo fornecido';
+      }
+
+      const porData = [...new Set(visiveis.map(dataDe))].sort(ordemDatas).map(dt => ({
+        dt, lista: visiveis.filter(s => dataDe(s) === dt).sort((x, y) => (modalidade(x.modalidadeId)?.nome || '').localeCompare(modalidade(y.modalidadeId)?.nome || ''))
+      }));
+
       p.innerHTML = `
       <div class="indicadores">
-        ${catanheiro
-          ? indicador('Catanhos a fornecer', rec, true) + indicador('Catanhos fornecidos', forn)
-          : indicador('Catanhos pendentes', pend, true) + indicador('Pedidos recebidos', rec) + indicador('Catanhos fornecidos', forn) + indicador('Total de catanhos', todas)}
+        ${paioleiro
+          ? indicador('Pedidos a fornecer', rec, true) + indicador('Pedidos fornecidos', forn)
+          : indicador('Pedidos pendentes', pend, true) + indicador('Pedidos recebidos', rec) + indicador('Pedidos fornecidos', forn) + indicador('Total de pedidos', naData)}
       </div>
       <section class="card">
-        <h2>${catanheiro ? 'Solicitações autorizadas' : 'Solicitações'}</h2>
-        <p class="muted small" style="margin-top:-.3rem">${catanheiro
-          ? 'Aqui aparecem as solicitações autorizadas pelo Administrador ("Pedido Recebido"). Ao entregar o catanho, clique em "Fornecido": a baixa no estoque é feita nesse momento.'
-          : 'Fluxo: Pendente → Pedido Recebido → Fornecido. A baixa no estoque ocorre somente no "Fornecido".'}</p>
+        <h2>${paioleiro ? 'Solicitações autorizadas' : 'Solicitações por data'}</h2>
+        <p class="muted small" style="margin-top:-.3rem">${paioleiro
+          ? 'Aqui aparecem as solicitações autorizadas pelo Administrador ("Pedido Recebido"). Ao entregar o pedido, clique em "Fornecido": a baixa no estoque é feita nesse momento.'
+          : 'Fluxo: Pendente → Pedido Recebido → Fornecido. A baixa no estoque ocorre somente no "Fornecido".'} Retirada sempre das ${RETIRADA_TEXTO}.</p>
+        <div class="filtro-data">
+          <label>Data da retirada
+            <select id="selData">
+              <option value="todas" ${!filtroData || filtroData === 'todas' ? 'selected' : ''}>Todas as datas</option>
+              ${(datas.includes(hoje) ? datas : [hoje, ...datas]).map(dt => {
+                const n = todas.filter(s => dataDe(s) === dt).length;
+                return `<option value="${dt}" ${filtroData === dt ? 'selected' : ''}>${esc(fmtDataSemana(dt))}${dt === hoje ? ' — hoje' : ''} · ${plural(n, 'solicitação', 'solicitações')}</option>`;
+              }).join('')}
+            </select>
+          </label>
+          <button type="button" class="btn secundario pequeno" id="btnHoje">Hoje</button>
+        </div>
         <div class="filtros">
-          ${(catanheiro
+          ${(paioleiro
             ? [['recebidos', 'A fornecer'], ['fornecidos', 'Fornecidos'], ['todas', 'Todas']]
             : [['todas', 'Todas'], ['pendentes', 'Pendentes'], ['recebidos', 'Pedido Recebido'], ['fornecidos', 'Fornecidos']]).map(([k, t]) =>
             `<button data-filtro="${k}" class="${filtroSolicitacoes === k ? 'ativo' : ''}">${t}</button>`).join('')}
         </div>
         <div class="erro" id="erroAtend"></div>
-        ${visiveis.length ? `<div class="tabela-wrap"><table>
-          <thead><tr><th>Registrada em</th><th>Modalidade</th><th>Evento</th><th>Retirada</th><th class="num">Catanhos</th><th>Itens</th><th>Responsável</th><th>Status</th></tr></thead>
-          <tbody>${visiveis.map(s => `<tr class="${classeLinha(s)}">
-              <td>${fmtDataHora(s.criadoEm)}</td>
-              <td>${esc(modalidade(s.modalidadeId)?.nome ?? '—')}</td>
-              <td>${esc(nomeEvento(evento(s.eventoId)))}</td>
-              <td>${esc(s.horarioRetirada || '—')}</td>
+        ${porData.length ? `<div class="tabela-wrap"><table>
+          <thead><tr><th>Modalidade</th><th class="num">Quantidade</th><th>Itens</th><th>Responsável</th><th>Registrada em</th><th>Status</th></tr></thead>
+          <tbody>${porData.map(({ dt, lista }) => `
+            <tr class="grupo-data"><td colspan="6">
+              <div class="grupo-titulo">📅 ${esc(fmtDataSemana(dt))}${dt === hoje ? ' <span class="status recebido">hoje</span>' : ''}
+                <span class="grupo-info">Retirada ${RETIRADA_TEXTO} · ${plural(lista.length, 'solicitação', 'solicitações')} · Quantidade total: ${fmtQtd(soma(lista))}</span></div>
+              <div class="grupo-itens">Itens a preparar: ${itensAPreparar(lista)}</div>
+            </td></tr>
+            ${lista.map(s => `<tr class="${classeLinha(s)}">
+              <td><strong>${esc(modalidade(s.modalidadeId)?.nome ?? '—')}</strong></td>
               <td class="num">${fmtQtd(s.quantidade)}</td>
               <td>${listaItensHtml(s)}</td>
               <td>${esc(s.usuarioNome || '—')}</td>
+              <td>${fmtDataHora(s.criadoEm)}</td>
               <td>${seloStatus(s)}${historicoStatus(s)}${acoes(s)}</td>
-            </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhuma solicitação neste filtro.</p>'}
+            </tr>${temAlteracoes(s) ? `<tr class="linha-registro"><td colspan="6">
+              <div class="registro-titulo">Registro de Alterações na Quantidade</div>
+              ${tabelaRegistro(s.alteracoes, s.fornecidoPorNome, fmtDataHora(s.fornecidoEm))}
+            </td></tr>` : ''}`).join('')}`).join('')}</tbody></table></div>` : '<p class="muted">Nenhuma solicitação neste filtro.</p>'}
       </section>`;
 
       const erro = msg => { $('erroAtend').textContent = msg; };
       const resumoTexto = s =>
         `Modalidade: ${modalidade(s.modalidadeId)?.nome ?? '—'}\n` +
-        `Evento: ${nomeEvento(evento(s.eventoId))}\n` +
-        `Retirada: ${s.horarioRetirada || '—'}\n` +
-        `Catanhos: ${fmtQtd(s.quantidade)}`;
+        `Data da retirada: ${fmtDataSemana(dataDe(s))}\n` +
+        `Retirada: ${textoRetirada(s)}\n` +
+        `Quantidade: ${fmtQtd(s.quantidade)}`;
+
+      $('selData').onchange = () => { filtroData = $('selData').value; PAINEIS.solicitacoes(p); };
+      $('btnHoje').onclick = () => { filtroData = hoje; PAINEIS.solicitacoes(p); };
 
       p.querySelectorAll('[data-filtro]').forEach(b => b.onclick = () => { filtroSolicitacoes = b.dataset.filtro; PAINEIS.solicitacoes(p); });
 
@@ -623,68 +793,148 @@
         });
       });
 
-      // ---- Fornecido (baixa no estoque, uma única vez) ----
+      // ---- Fornecido (tela de fornecimento; baixa no estoque, uma única vez) ----
       p.querySelectorAll('[data-fornecer]').forEach(b => b.onclick = () => {
         const s = dados.solicitacoes.find(x => x.id === b.dataset.fornecer);
-        const comBaixa = baixaNoFornecimento(s);
-        const listaBaixa = itensDaSolicitacao(s).map(i => `• ${i.nome}: ${qtdUn(i.quantidade, i.unidade)}`).join('\n');
-        const texto = `Confirmar que este catanho foi FORNECIDO ao responsável?\n\n${resumoTexto(s)}\n\n` +
-          (comBaixa
-            ? `Serão descontados do estoque:\n${listaBaixa}\n\nEsta ação não pode ser desfeita.`
-            : 'Esta solicitação é anterior ao novo fluxo: o estoque já foi baixado e não será baixado novamente.');
-        if (!window.confirm(texto)) return;
-
-        comBotao(b, async () => {
-          const solRef = doc(db, 'solicitacoes', s.id);
-          try {
-            // Confere o status atual no servidor (evita baixa duplicada após atualização da página).
-            const atualSnap = await getDoc(solRef);
-            const atual = { id: atualSnap.id, ...atualSnap.data() };
-            if (statusDe(atual) === 'fornecido') return ctxSol.recarregar('Esta solicitação já estava marcada como Fornecido. Nenhuma nova baixa foi feita.');
-            if (statusDe(atual) !== 'recebido') return erro('Esta solicitação precisa estar como "Pedido Recebido" antes de ser marcada como Fornecido.');
-
-            const lote = writeBatch(db);
-            lote.update(solRef, {
-              status: 'fornecido',
-              fornecidoEm: serverTimestamp(),
-              fornecidoPorUid: perfil.uid,
-              fornecidoPorNome: perfil.nome
-            });
-            if (baixaNoFornecimento(atual)) {
-              const lista = itensDaSolicitacao(atual);
-              const snaps = await Promise.all(lista.map(i => getDoc(doc(db, 'itens', i.id))));
-              const faltas = [];
-              lista.forEach((i, k) => {
-                const it = snaps[k].exists() ? snaps[k].data() : null;
-                if (!it) faltas.push(`${i.nome}: item não encontrado no cadastro.`);
-                else if (it.saldo < i.quantidade)
-                  faltas.push(`${i.nome}: estoque insuficiente (necessário ${qtdUn(i.quantidade, i.unidade)}; disponível ${qtdUn(Math.max(it.saldo, 0), it.unidade)}).`);
-              });
-              if (faltas.length) return erro('Não foi possível marcar como Fornecido:\n' + faltas.join('\n') + '\nRegistre uma entrada no estoque e tente novamente.');
-              lista.forEach(i => lote.update(doc(db, 'itens', i.id), {
-                saldo: increment(-i.quantidade),
-                saidas: increment(i.quantidade),
-                ultimaBaixa: s.id,
-                ultimaBaixaEm: serverTimestamp()
-              }));
-            }
-            await lote.commit();
-            ctxSol.recarregar(baixaNoFornecimento(atual)
-              ? 'Solicitação marcada como Fornecido e baixa realizada no estoque.'
-              : 'Solicitação marcada como Fornecido.');
-          } catch (err) {
-            // Se a gravação chegou ao servidor e só a resposta se perdeu, não repete.
-            try {
-              const depois = await getDoc(solRef);
-              if (depois.exists() && depois.data().status === 'fornecido')
-                return ctxSol.recarregar('Solicitação marcada como Fornecido.');
-            } catch (_) { /* sem acesso ou sem conexão */ }
-            erro(err.code === 'permission-denied'
-              ? 'Não foi possível marcar como Fornecido: o estoque ou o status foi alterado. Clique em Atualizar e tente novamente.'
-              : msgErro(err));
-          }
-        });
+        abrirFornecimento(s);
       });
+
+      function abrirFornecimento(s) {
+        $('secFornec')?.remove();
+        const comBaixa = baixaNoFornecimento(s);
+        const lista = itensDaSolicitacao(s);
+        p.insertAdjacentHTML('afterbegin', `
+        <section class="card fornecimento" id="secFornec">
+          <h2>Fornecimento</h2>
+          <dl class="resumo">
+            <dt>Modalidade</dt><dd>${esc(modalidade(s.modalidadeId)?.nome ?? '—')}</dd>
+            <dt>Data da retirada</dt><dd>${esc(fmtDataSemana(dataDe(s)))}</dd>
+            <dt>Retirada</dt><dd>${esc(textoRetirada(s))}</dd>
+            <dt>Responsável</dt><dd>${esc(s.usuarioNome || '—')}</dd>
+            <dt>Quantidade aprovada</dt><dd>${fmtQtd(s.quantidade)}</dd>
+          </dl>
+          ${comBaixa ? `
+          <p class="muted small">Confira cada item. Você pode <strong>manter ou reduzir</strong> a quantidade fornecida, mas não pode ultrapassar a quantidade aprovada pelo Administrador. A baixa no estoque considera a quantidade fornecida.</p>
+          <div class="tabela-wrap"><table>
+            <thead><tr><th>Item</th><th class="num">Aprovado</th><th class="num">Fornecido</th><th>Justificativa da redução (opcional)</th></tr></thead>
+            <tbody>${lista.map(i => `<tr>
+              <td><strong>${esc(i.nome)}</strong></td>
+              <td class="num">${esc(qtdUn(i.quantidade, i.unidade))}</td>
+              <td class="num"><input type="number" min="0" max="${i.quantidade}" step="1" inputmode="numeric" data-forn="${i.id}" value="${i.quantidade}" aria-label="Quantidade fornecida de ${esc(i.nome)}" style="max-width:110px;margin-left:auto"></td>
+              <td><input data-just="${i.id}" maxlength="300" placeholder="Motivo da redução" aria-label="Justificativa para ${esc(i.nome)}"></td>
+            </tr>`).join('')}</tbody></table></div>
+          <h3 style="font-size:1rem;margin-top:1.1rem">Registro de Alterações na Quantidade</h3>
+          <div id="previaRegistro"></div>` : `
+          <p class="muted small">Esta solicitação é anterior ao fornecimento com ajuste de quantidade: o estoque já foi baixado na época e não será baixado novamente.</p>`}
+          <div class="erro" id="erroFornec" style="margin-top:.8rem"></div>
+          <div class="acoes">
+            <button class="btn primario" id="btnConfirmarFornec">Confirmar fornecimento</button>
+            <button class="btn secundario" id="btnCancelarFornec">Cancelar</button>
+          </div>
+        </section>`);
+        $('secFornec').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+        const erroF = msg => { $('erroFornec').textContent = msg; };
+        $('btnCancelarFornec').onclick = () => $('secFornec').remove();
+
+        // Lê os valores informados e monta o registro (somente itens reduzidos).
+        function lerFornecimento() {
+          const fornecidos = {}, alteracoes = {}, erros = [];
+          for (const i of lista) {
+            const f = paraInteiro(document.querySelector(`[data-forn="${i.id}"]`).value);
+            const just = document.querySelector(`[data-just="${i.id}"]`).value.trim().slice(0, 300);
+            if (f == null || Number.isNaN(f) || f < 0) { erros.push(`${i.nome}: informe a quantidade fornecida (número inteiro, zero ou mais).`); continue; }
+            if (f > i.quantidade) { erros.push(`${i.nome}: a quantidade fornecida (${qtdUn(f, i.unidade)}) não pode ser maior que a aprovada (${qtdUn(i.quantidade, i.unidade)}).`); continue; }
+            fornecidos[i.id] = f;
+            if (f < i.quantidade)
+              alteracoes[i.id] = { nome: i.nome, unidade: i.unidade, aprovada: i.quantidade, fornecida: f, diferenca: i.quantidade - f, justificativa: just };
+          }
+          if (!erros.length && Object.values(fornecidos).every(f => f === 0))
+            erros.push('Informe ao menos um item com quantidade fornecida maior que zero.');
+          return { fornecidos, alteracoes, erros };
+        }
+        function atualizarPrevia() {
+          const { alteracoes } = lerFornecimento();
+          $('previaRegistro').innerHTML = tabelaRegistro(alteracoes, perfil.nome, 'no momento da confirmação');
+        }
+        if (comBaixa) {
+          document.querySelectorAll('#secFornec [data-forn], #secFornec [data-just]').forEach(inp => inp.oninput = atualizarPrevia);
+          atualizarPrevia();
+        }
+
+        $('btnConfirmarFornec').onclick = () => {
+          const leitura = comBaixa ? lerFornecimento() : { fornecidos: {}, alteracoes: {}, erros: [] };
+          if (leitura.erros.length) return erroF(leitura.erros.join('\n'));
+          const linhas = lista.map(i => {
+            const f = leitura.fornecidos[i.id];
+            return `• ${i.nome}: fornecido ${qtdUn(f, i.unidade)}${f < i.quantidade ? ` (aprovado ${qtdUn(i.quantidade, i.unidade)}; redução de ${qtdUn(i.quantidade - f, i.unidade)})` : ''}`;
+          }).join('\n');
+          const texto = `Confirmar que este pedido foi FORNECIDO ao responsável?\n\n${resumoTexto(s)}\n\n` +
+            (comBaixa ? `Serão descontados do estoque:\n${linhas}\n\nEsta ação não pode ser desfeita.`
+                      : 'O estoque já foi baixado anteriormente e não será baixado novamente.');
+          if (!window.confirm(texto)) return;
+          fornecer(s, leitura);
+        };
+
+        function fornecer(s, leitura) {
+          const btn = $('btnConfirmarFornec');
+          comBotao(btn, async () => {
+            const solRef = doc(db, 'solicitacoes', s.id);
+            try {
+              // Confere o status atual no servidor (evita baixa duplicada após atualização da página).
+              const atualSnap = await getDoc(solRef);
+              const atual = { id: atualSnap.id, ...atualSnap.data() };
+              if (statusDe(atual) === 'fornecido') return ctxSol.recarregar('Esta solicitação já estava marcada como Fornecido. Nenhuma nova baixa foi feita.');
+              if (statusDe(atual) !== 'recebido') return erroF('Esta solicitação precisa estar como "Pedido Recebido" antes de ser marcada como Fornecido.');
+
+              const lote = writeBatch(db);
+              const dadosFornec = {
+                status: 'fornecido',
+                fornecidoEm: serverTimestamp(),
+                fornecidoPorUid: perfil.uid,
+                fornecidoPorNome: perfil.nome
+              };
+              if (baixaNoFornecimento(atual)) {
+                const itensAtuais = itensDaSolicitacao(atual);
+                const snaps = await Promise.all(itensAtuais.map(i => getDoc(doc(db, 'itens', i.id))));
+                const faltas = [];
+                itensAtuais.forEach((i, k) => {
+                  const f = leitura.fornecidos[i.id];
+                  const it = snaps[k].exists() ? snaps[k].data() : null;
+                  if (f == null || f > i.quantidade) faltas.push(`${i.nome}: quantidade fornecida inválida.`);
+                  else if (!it) faltas.push(`${i.nome}: item não encontrado no cadastro.`);
+                  else if (it.saldo < f)
+                    faltas.push(`${i.nome}: estoque insuficiente (necessário ${qtdUn(f, i.unidade)}; disponível ${qtdUn(Math.max(it.saldo, 0), it.unidade)}).`);
+                });
+                if (faltas.length) return erroF('Não foi possível marcar como Fornecido:\n' + faltas.join('\n') + '\nAjuste a quantidade fornecida ou registre uma entrada no estoque.');
+                // A quantidade aprovada (campo "itens") não é alterada: o fornecido fica em campos próprios.
+                dadosFornec.fornecidos = leitura.fornecidos;
+                dadosFornec.alteracoes = leitura.alteracoes;
+                itensAtuais.forEach(i => lote.update(doc(db, 'itens', i.id), {
+                  saldo: increment(-leitura.fornecidos[i.id]),
+                  saidas: increment(leitura.fornecidos[i.id]),
+                  ultimaBaixa: s.id,
+                  ultimaBaixaEm: serverTimestamp()
+                }));
+              }
+              lote.update(solRef, dadosFornec);
+              await lote.commit();
+              ctxSol.recarregar(baixaNoFornecimento(atual)
+                ? 'Solicitação marcada como Fornecido e baixa realizada no estoque pela quantidade fornecida.'
+                : 'Solicitação marcada como Fornecido.');
+            } catch (err) {
+              // Se a gravação chegou ao servidor e só a resposta se perdeu, não repete.
+              try {
+                const depois = await getDoc(solRef);
+                if (depois.exists() && depois.data().status === 'fornecido')
+                  return ctxSol.recarregar('Solicitação marcada como Fornecido.');
+              } catch (_) { /* sem acesso ou sem conexão */ }
+              erroF(err.code === 'permission-denied'
+                ? 'Não foi possível marcar como Fornecido: o estoque ou o status foi alterado. Clique em Atualizar e tente novamente.'
+                : msgErro(err));
+            }
+          });
+        }
+      }
     },
 
     /* ---- Itens e estoque ---- */
@@ -701,9 +951,11 @@
           quantidade: m.quantidade, unidade: item(m.itemId)?.unidade ?? '', origem: m.porNome || '—', saida: false
         })),
         ...dados.solicitacoes.filter(estoqueBaixado).flatMap(s => itensDaSolicitacao(s).map(i => ({
-          quando: dataDaBaixa(s), itemNome: i.nome, tipo: 'Saída', quantidade: i.quantidade, unidade: i.unidade,
-          origem: `Fornecido · ${modalidade(s.modalidadeId)?.nome ?? '—'}${s.fornecidoPorNome ? ' · por ' + s.fornecidoPorNome : ''}`, saida: true
-        })))
+          quando: dataDaBaixa(s), itemNome: i.nome, tipo: 'Saída', quantidade: qtdFornecida(s, i), unidade: i.unidade,
+          origem: `Fornecido · ${modalidade(s.modalidadeId)?.nome ?? '—'}${s.fornecidoPorNome ? ' · por ' + s.fornecidoPorNome : ''}` +
+            (qtdFornecida(s, i) !== i.quantidade ? ` · aprovado ${qtdUn(i.quantidade, i.unidade)}, reduzido em ${qtdUn(i.quantidade - qtdFornecida(s, i), i.unidade)}` : ''),
+          saida: true
+        })).filter(m => m.quantidade > 0))
       ].sort((a, b) => ms(b.quando) - ms(a.quando));
 
       p.innerHTML = `
@@ -716,7 +968,7 @@
             <label>Estoque inicial<input type="number" min="0" step="1" inputmode="numeric" name="inicial" value="${editavel(ed?.estoqueInicial)}" ${temMovimento ? 'readonly' : ''}></label>
           </div>
           <datalist id="listaUnidades">${UNIDADES.map(u => `<option value="${u}">`).join('')}</datalist>
-          <p class="muted small" style="margin-top:-.4rem">Use números inteiros. Em cada solicitação, o item é descontado na mesma quantidade de catanhos pedida.${temMovimento ? ' Este item já tem movimentações; para aumentar o estoque, registre uma entrada.' : ''}</p>
+          <p class="muted small" style="margin-top:-.4rem">Use números inteiros. Em cada solicitação, o item é descontado pela quantidade efetivamente fornecida.${temMovimento ? ' Este item já tem movimentações; para aumentar o estoque, registre uma entrada.' : ''}</p>
           <div class="erro" id="erroItem"></div>
           <div class="acoes">${botaoSalvar(ed, 'btnItem')}${botaoCancelar(ed)}</div>
         </form>
@@ -842,10 +1094,10 @@
     /* ---- Modalidades e limites ---- */
     modalidades(p) {
       p.innerHTML = `<section class="card">
-        <h2>Modalidades e limite máximo de catanhos</h2>
+        <h2>Modalidades e limite máximo de pedidos</h2>
         <form id="fMod" novalidate>
           <div class="tabela-wrap"><table>
-            <thead><tr><th>#</th><th>Modalidade</th><th>Limite máximo de catanhos</th><th>Responsável</th></tr></thead>
+            <thead><tr><th>#</th><th>Modalidade</th><th>Limite máximo de pedidos</th><th>Responsável</th></tr></thead>
             <tbody>${dados.modalidades.map((m, i) => {
               const resp = dados.usuarios.find(u => u.modalidadeId === m.id);
               return `<tr>
@@ -886,14 +1138,14 @@
       };
     },
 
-    /* ---- Catanheiros ---- */
-    catanheiros(p, editId) {
-      const lst = dados.usuarios.filter(u => u.perfil === 'catanheiro').sort((a, b) => a.nome.localeCompare(b.nome));
+    /* ---- Paioleiros ---- */
+    paioleiros(p, editId) {
+      const lst = dados.usuarios.filter(ehPerfilPaioleiro).sort((a, b) => a.nome.localeCompare(b.nome));
       const ed = editId ? dados.usuarios.find(u => u.id === editId) : null;
       p.innerHTML = `
       <section class="card">
-        <h2>${ed ? 'Editar catanheiro' : 'Cadastrar catanheiro'}</h2>
-        <p class="muted small" style="margin-top:-.3rem">O catanheiro vê apenas as solicitações autorizadas ("Pedido Recebido") e só pode marcá-las como "Fornecido". Não acessa itens, estoque, limites, eventos nem cadastros.</p>
+        <h2>${ed ? 'Editar paioleiro' : 'Cadastrar paioleiro'}</h2>
+        <p class="muted small" style="margin-top:-.3rem">O paioleiro vê apenas as solicitações autorizadas ("Pedido Recebido") e só pode marcá-las como "Fornecido", podendo manter ou reduzir a quantidade de cada item. Não acessa itens, estoque, limites, eventos nem cadastros.</p>
         <form id="fCat" novalidate>
           <div class="grade">
             <label>Nome<input name="nome" value="${esc(ed?.nome)}"></label>
@@ -910,19 +1162,19 @@
         </form>
       </section>
       <section class="card">
-        <h2>Catanheiros cadastrados</h2>
+        <h2>Paioleiros cadastrados</h2>
         ${lst.length ? `<div class="tabela-wrap"><table>
           <thead><tr><th>Nome</th><th>Usuário/e-mail</th><th></th></tr></thead>
           <tbody>${lst.map(u => `<tr>
             <td>${esc(u.nome)}</td><td>${esc(u.email)}</td>
             <td class="num"><button class="btn secundario pequeno" data-edit="${u.id}">Editar</button></td>
-          </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhum catanheiro cadastrado.</p>'}
+          </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhum paioleiro cadastrado.</p>'}
       </section>`;
 
-      p.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => PAINEIS.catanheiros(p, b.dataset.edit));
+      p.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => PAINEIS.paioleiros(p, b.dataset.edit));
       const erro = msg => { $('erroCat').textContent = msg; };
       if (ed) {
-        $('btnCancelar').onclick = () => PAINEIS.catanheiros(p);
+        $('btnCancelar').onclick = () => PAINEIS.paioleiros(p);
         $('btnRedefinir').onclick = () => comBotao($('btnRedefinir'), async () => {
           try {
             await sendPasswordResetEmail(auth, ed.email);
@@ -945,15 +1197,15 @@
           try {
             if (ed) {
               await updateDoc(doc(db, 'usuarios', ed.id), { nome });
-              return salvo('catanheiros', 'Catanheiro atualizado.');
+              return salvo('paioleiros', 'Paioleiro atualizado.');
             }
             const uid = await criarAcesso(email, senha);
             try {
-              await setDoc(doc(db, 'usuarios', uid), { nome, email, perfil: 'catanheiro' });
+              await setDoc(doc(db, 'usuarios', uid), { nome, email, perfil: 'paioleiro' });
             } catch (err) {
               return erro('O acesso foi criado, mas o perfil não foi salvo (' + msgErro(err) + ').');
             }
-            salvo('catanheiros', 'Catanheiro cadastrado.');
+            salvo('paioleiros', 'Paioleiro cadastrado.');
           } catch (err) { erro(msgErro(err)); }
         });
       };
@@ -1041,65 +1293,7 @@
           } catch (err) { erro(msgErro(err)); }
         });
       };
-    },
-
-    /* ---- Eventos ---- */
-    eventos(p, editId) {
-      const ed = editId ? evento(editId) : null;
-      const l = eventosOrdenados();
-      p.innerHTML = `
-      <section class="card">
-        <h2>${ed ? 'Editar evento' : 'Cadastrar evento'}</h2>
-        <form id="fEv" novalidate>
-          <div class="grade">
-            <label>Modalidade
-              <select name="modalidade">
-                <option value="">Selecione</option>
-                ${dados.modalidades.map(m => `<option value="${m.id}" ${ed?.modalidadeId === m.id ? 'selected' : ''}>${esc(m.nome)}</option>`).join('')}
-              </select>
-            </label>
-            <label>Nome do evento<input name="nome" value="${esc(ed?.nome)}"></label>
-            <label>Data<input type="date" name="data" value="${esc(ed?.data)}"></label>
-            <label>Local<input name="local" value="${esc(ed?.local)}"></label>
-          </div>
-          <div class="erro" id="erroEv"></div>
-          <div class="acoes">${botaoSalvar(ed, 'btnEv')}${botaoCancelar(ed)}</div>
-        </form>
-      </section>
-      <section class="card">
-        <h2>Eventos cadastrados</h2>
-        ${l.length ? `<div class="tabela-wrap"><table>
-          <thead><tr><th>Evento</th><th>Modalidade</th><th>Data</th><th>Local</th><th></th></tr></thead>
-          <tbody>${l.map(ev => `<tr>
-            <td>${esc(ev.nome)}</td>
-            <td>${modalidade(ev.modalidadeId) ? esc(modalidade(ev.modalidadeId).nome) : '<span class="status pendente">Sem modalidade</span>'}</td>
-            <td>${fmtData(ev.data)}</td><td>${esc(ev.local || '—')}</td>
-            <td class="num"><button class="btn secundario pequeno" data-edit="${ev.id}">Editar</button></td>
-          </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhum evento cadastrado.</p>'}
-      </section>`;
-
-      p.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => PAINEIS.eventos(p, b.dataset.edit));
-      if (ed) $('btnCancelar').onclick = () => PAINEIS.eventos(p);
-
-      $('fEv').onsubmit = e => {
-        e.preventDefault();
-        const f = new FormData(e.target);
-        const modalidadeId = String(f.get('modalidade'));
-        const nome = String(f.get('nome')).trim();
-        const data = String(f.get('data'));
-        const local = String(f.get('local')).trim();
-        const erro = msg => { $('erroEv').textContent = msg; };
-        if (!modalidadeId) return erro('Selecione a modalidade do evento.');
-        if (!nome) return erro('Informe o nome do evento.');
-        if (!data) return erro('Informe a data do evento.');
-        comBotao($('btnEv'), async () => {
-          try {
-            if (ed) await updateDoc(doc(db, 'eventos', ed.id), { modalidadeId, nome, data, local });
-            else await addDoc(collection(db, 'eventos'), { modalidadeId, nome, data, local });
-            salvo('eventos', ed ? 'Evento atualizado.' : 'Evento cadastrado.');
-          } catch (err) { erro(msgErro(err)); }
-        });
-      };
     }
+
   };
 })();
