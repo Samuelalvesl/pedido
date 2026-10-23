@@ -183,3 +183,8 @@ tr.linha-registro:hover td{background:#fffaf0}
 .aviso-perigo{background:var(--erro-fundo);color:var(--erro);border-left:4px solid var(--erro);padding:.6rem .8rem;border-radius:8px;font-weight:600;margin-bottom:.6rem}
 tr.linha-falha td{background:#fff6f5}
 .filtros-hist label{margin-bottom:.6rem}
+
+/* ===== Limite de pedidos por dia ===== */
+.dia.parcial{background:#f3f7ff;border-color:var(--azul-400);color:var(--azul-800)}
+.leg.parcial{background:#f3f7ff;border-color:var(--azul-400)}
+.marca-dia{font-weight:700}

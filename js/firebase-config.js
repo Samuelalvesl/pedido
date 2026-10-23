@@ -1,5 +1,6 @@
 /*
- * Configuração do Firebase do projeto Catanho.
+ * Configuração do Firebase do sistema PEDIDO.
+ * (O identificador técnico do projeto no Firebase não pode ser alterado; ele não aparece para os usuários.)
  *
  * Estes valores NÃO são senhas: o Firebase foi feito para que eles fiquem visíveis
  * no navegador. Quem protege os dados são o Authentication e as regras do Firestore.
