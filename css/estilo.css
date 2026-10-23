@@ -188,3 +188,13 @@ tr.linha-falha td{background:#fff6f5}
 .dia.parcial{background:#f3f7ff;border-color:var(--azul-400);color:var(--azul-800)}
 .leg.parcial{background:#f3f7ff;border-color:var(--azul-400)}
 .marca-dia{font-weight:700}
+
+/* ===== Vale Extraordinário de Gêneros ===== */
+.resumo-vale{background:var(--azul-50);border:1px solid var(--azul-200);border-left:4px solid var(--azul-700);border-radius:8px;padding:.7rem .9rem;margin:.2rem 0 .9rem;font-size:.9rem;line-height:1.6}
+
+/* Assinaturas do Vale */
+.assin-grade{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem}
+.assin-campo{border:1px solid var(--azul-200);border-radius:10px;padding:.8rem .9rem;background:#fff}
+.assin-campo h3{margin:0 0 .2rem;font-size:1rem;color:var(--azul-900)}
+.assin-previa{height:120px;display:flex;align-items:center;justify-content:center;background:#fff;border:1px dashed var(--azul-200);border-radius:8px;margin:.5rem 0;padding:.4rem;overflow:hidden}
+.assin-previa img{max-width:100%;max-height:100%;object-fit:contain}

@@ -77,7 +77,7 @@
   let ctxSol = CTX_ADMIN;
 
   function vazio() {
-    return { modalidades: [], eventos: [], usuarios: [], solicitacoes: [], itens: [], movimentos: [], exclusoes: [], auditoria: [], contadores: [] };
+    return { modalidades: [], eventos: [], usuarios: [], solicitacoes: [], itens: [], movimentos: [], exclusoes: [], auditoria: [], contadores: [], vales: [] };
   }
 
   /* ---------- Utilitários ---------- */
@@ -374,10 +374,17 @@
     desenharCalendario(mod);
   }
 
-  function msgLimiteModalidade(m) {
-    return m.limite == null
-      ? 'A quantidade máxima por solicitação deste setor ainda não foi definida pelo Administrador.'
-      : `Quantidade máxima permitida por solicitação neste setor: ${fmtQtd(m.limite)}.`;
+  // Limite diário de QUANTIDADE do setor (campo "limite" do setor, definido pelo
+  // Administrador): a soma das quantidades de todas as solicitações do setor na mesma
+  // data não pode ultrapassá-lo. É independente do limite de NÚMERO de pedidos por dia.
+  function msgLimiteModalidade(m, jaSolicitado, tentando) {
+    if (m.limite == null) return 'O limite diário de quantidade deste setor ainda não foi definido pelo Administrador.';
+    const disp = Math.max(0, arred(m.limite - jaSolicitado));
+    return `Limite diário de quantidade ultrapassado.\n` +
+      `• Limite diário definido pelo Administrador: ${fmtQtd(m.limite)}\n` +
+      `• Quantidade já solicitada nesta data: ${fmtQtd(jaSolicitado)}\n` +
+      `• Quantidade ainda disponível: ${fmtQtd(disp)}\n` +
+      `• Quantidade que você está tentando solicitar: ${fmtQtd(tentando)}`;
   }
   const msgPrazoEncerrado = dt => `O prazo para solicitar para ${fmtData(dt)} encerrou às ${PRAZO_TEXTO} (horário de Brasília). Não é mais possível solicitar para esta data.`;
   const MSG_DATA_PASSADA = 'Não é possível solicitar para datas anteriores a hoje.';
@@ -391,6 +398,14 @@
     const c = (dados.contadores || []).find(x => x.data === dt);
     return Math.max(c ? c.n || 0 : 0, dados.solicitacoes.filter(s => dataDe(s) === dt).length);
   }
+  // Soma das quantidades já solicitadas pelo setor na data (contador no Firebase).
+  function quantidadeNaData(dt) {
+    const c = (dados.contadores || []).find(x => x.data === dt);
+    const soma = arred(dados.solicitacoes.filter(s => dataDe(s) === dt).reduce((t, s) => t + (s.quantidade || 0), 0));
+    return Math.max(c ? c.total || 0 : 0, soma);
+  }
+  const disponivelNaData = (mod, dt) => mod.limite == null ? 0 : Math.max(0, arred(mod.limite - quantidadeNaData(dt)));
+  const msgQuantidadeEsgotada = (mod, dt) => `Seu setor já solicitou toda a quantidade diária permitida para ${fmtData(dt)} (limite diário: ${fmtQtd(mod.limite ?? 0)}). Não é possível fazer novas solicitações para esta data.`;
   const restantesNaData = (mod, dt) => Math.max(0, limiteDia(mod) - usadosNaData(dt));
   const msgLimiteDiario = (mod, dt) => `Seu setor já atingiu o limite diário de ${plural(limiteDia(mod), 'pedido', 'pedidos')} para ${fmtData(dt)}. Não é possível fazer novas solicitações para esta data.`;
 
@@ -409,11 +424,11 @@
       const dt = isoData(ano, mes, dia);
       const sit = situacaoData(dt);
       const usados = usadosNaData(dt);
-      const cheio = usados >= limite;
+      const cheio = usados >= limite || (mod.limite != null && !(disponivelNaData(mod, dt) > EPS));
       const classes = ['dia', sit, dt === hoje ? 'hoje' : '', cheio ? 'solicitado' : usados ? 'parcial' : '', dt === dataSelecionada ? 'selecionado' : ''].join(' ');
       const titulo = sit === 'passada' ? 'Data anterior a hoje'
         : sit === 'encerrada' ? `Prazo encerrado (${PRAZO_TEXTO})`
-        : cheio ? `Limite diário atingido (${usados}/${limite})` : usados ? `${usados} de ${limite} pedidos feitos` : 'Disponível';
+        : cheio ? `Limite diário atingido (${usados}/${limite} pedidos; ${fmtQtd(quantidadeNaData(dt))} de ${fmtQtd(mod.limite ?? 0)} em quantidade)` : usados ? `${usados} de ${limite} pedidos feitos` : 'Disponível';
       celulas += `<button type="button" class="${classes}" data-dia="${dt}" ${sit === 'passada' ? 'disabled' : ''} title="${titulo}" aria-label="${fmtData(dt)}: ${titulo}">
         <span class="num-dia">${dia}</span>${usados ? `<span class="marca-dia">${cheio ? '✓' : ''}${limite > 1 ? `${usados}/${limite}` : ''}</span>` : sit === 'encerrada' ? '<span class="marca-dia">⏱</span>' : ''}
       </button>`;
@@ -421,7 +436,7 @@
 
     $('secCalendario').innerHTML = `
       <h2>Escolha a data da retirada</h2>
-      <p class="muted small" style="margin-top:-.3rem">Solicitações até as <strong>${PRAZO_TEXTO} do próprio dia</strong> da retirada (horário de Brasília). Retirada sempre das <strong>${RETIRADA_TEXTO}</strong>. Limite do seu setor: <strong>${plural(limiteDia(mod), 'pedido', 'pedidos')} por dia</strong>.</p>
+      <p class="muted small" style="margin-top:-.3rem">Solicitações até as <strong>${PRAZO_TEXTO} do próprio dia</strong> da retirada (horário de Brasília). Retirada sempre das <strong>${RETIRADA_TEXTO}</strong>. Limites diários do seu setor: <strong>${plural(limiteDia(mod), 'pedido', 'pedidos')}</strong> e <strong>${mod.limite != null ? fmtQtd(mod.limite) : '—'} de quantidade</strong> (soma de todos os pedidos da data).</p>
       <div class="calendario">
         <div class="cal-topo">
           <button type="button" class="btn secundario pequeno" id="calAnt" ${mesAtual ? 'disabled' : ''} aria-label="Mês anterior">‹</button>
@@ -447,6 +462,7 @@
       if (sit === 'passada') return desenharCalendario(mod, MSG_DATA_PASSADA);
       if (sit === 'encerrada') { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, msgPrazoEncerrado(dt)); }
       if (restantesNaData(mod, dt) <= 0) { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, msgLimiteDiario(mod, dt)); }
+      if (mod.limite != null && !(disponivelNaData(mod, dt) > EPS)) { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, msgQuantidadeEsgotada(mod, dt)); }
       dataSelecionada = dt;
       desenharCalendario(mod);
       formularioSolicitacao(mod, { data: dt });
@@ -457,12 +473,12 @@
   // Validação usada no formulário e novamente antes de gravar (com dados atualizados).
   // Cada item marcado recebe a mesma quantidade solicitada.
   // A baixa no estoque só ocorre quando o pedido é marcado como "Fornecido".
-  function validarSolicitacao(mod, d, catalogo) {
+  function validarSolicitacao(mod, d, catalogo, jaSolicitado = 0) {
     const erros = [], itens = [];
     const sit = situacaoData(d.data);
     if (sit === 'passada') erros.push(MSG_DATA_PASSADA);
     if (sit === 'encerrada') erros.push(msgPrazoEncerrado(d.data));
-    if (mod.limite == null || maior(d.quantidade, mod.limite)) erros.push(msgLimiteModalidade(mod));
+    if (mod.limite == null || maior(jaSolicitado + d.quantidade, mod.limite)) erros.push(msgLimiteModalidade(mod, jaSolicitado, d.quantidade));
     if (!d.itemIds.length) erros.push('Selecione pelo menos um item para compor o pedido.');
     if (d.itemIds.length > MAX_ITENS_POR_SOLICITACAO) erros.push(`Selecione no máximo ${MAX_ITENS_POR_SOLICITACAO} itens por solicitação.`);
     for (const id of d.itemIds) {
@@ -492,12 +508,13 @@
           <span class="small">Horário fixo para todas as solicitações.</span>
         </div>
         <p class="muted small" style="margin-top:-.3rem">Prazo para enviar: até as ${PRAZO_TEXTO} de ${esc(fmtData(valores.data))} (horário de Brasília).</p>
-        <div class="aviso" id="avisoRestantes">Você ainda pode fazer <strong>${plural(restantesNaData(mod, valores.data), 'pedido', 'pedidos')}</strong> para esta data (limite do setor: ${plural(limiteDia(mod), 'pedido', 'pedidos')} por dia).</div>
+        <div class="aviso" id="avisoRestantes">Para esta data você ainda pode fazer <strong>${plural(restantesNaData(mod, valores.data), 'pedido', 'pedidos')}</strong> (limite: ${plural(limiteDia(mod), 'pedido', 'pedidos')} por dia)
+          e solicitar até <strong>${fmtQtd(disponivelNaData(mod, valores.data))}</strong> de quantidade (limite diário: ${mod.limite != null ? fmtQtd(mod.limite) : 'não definido'}; já solicitado: ${fmtQtd(quantidadeNaData(valores.data))}).</div>
         <label>Quantidade
           <input type="text" id="inpQtd" inputmode="decimal" placeholder="ex.: 10 ou 2,5" value="${editavel(valores.quantidade)}">
         </label>
         <p class="muted small" style="margin-top:-.5rem">
-          ${mod.limite != null ? `Quantidade máxima por solicitação: ${fmtQtd(mod.limite)}.` : 'Quantidade máxima por solicitação ainda não definida pelo Administrador.'}
+          ${mod.limite != null ? `A soma dos pedidos do setor na data não pode passar de ${fmtQtd(mod.limite)}.` : 'Limite diário de quantidade ainda não definido pelo Administrador.'}
         </p>
 
         <h3 style="font-size:1rem;margin-top:1rem">Itens do pedido</h3>
@@ -530,7 +547,7 @@
       if (quantidade == null || Number.isNaN(quantidade) || !(quantidade > EPS)) return erro(`Informe uma quantidade válida, maior que zero (${DICA_DECIMAL}; até 3 casas decimais).`);
       const itemIds = [...document.querySelectorAll('[data-item]:checked')].map(c => c.dataset.item);
       const d = { data: valores.data, quantidade, itemIds };
-      const { erros, itens } = validarSolicitacao(mod, d, dados.itens);
+      const { erros, itens } = validarSolicitacao(mod, d, dados.itens, quantidadeNaData(d.data));
       if (erros.length) return erro(erros.join('\n'));
       d.itens = itens;
       resumoSolicitacao(mod, d);
@@ -568,7 +585,7 @@
         ]);
         modAtual = { id: mSnap.id, ...mSnap.data() };
         const catalogo = snaps.filter(s => s.exists()).map(s => ({ id: s.id, ...s.data() }));
-        const { erros, itens } = validarSolicitacao(modAtual, d, catalogo);
+        const { erros, itens } = validarSolicitacao(modAtual, d, catalogo, 0);
         if (erros.length) return erro(erros.join('\n'));
         itensMap = {};
         itens.forEach(i => { itensMap[i.id] = { nome: i.nome, unidade: i.unidade, quantidade: i.quantidade }; });
@@ -577,17 +594,22 @@
       // Ocupa a próxima posição do dia. Se outra solicitação do setor for gravada ao
       // mesmo tempo, o Firebase recusa uma delas e o sistema tenta a posição seguinte.
       for (let tentativa = 0; tentativa < 4; tentativa++) {
-        let n;
+        let n, totalAnterior;
         try {
           const cSnap = await getDoc(contRef);
           n = (cSnap.exists() ? cSnap.data().n || 0 : 0) + 1;
+          totalAnterior = cSnap.exists() ? cSnap.data().total || 0 : 0;
         } catch (e) { return erro(msgErro(e)); }
         const usadosAgora = Math.max(n - 1, dados.solicitacoes.filter(s => dataDe(s) === d.data).length);
         if (usadosAgora >= limiteDia(modAtual)) return erro(msgLimiteDiario(modAtual, d.data));
+        // Soma acumulada do setor na data (o Firebase confere a mesma conta).
+        const jaSolicitado = Math.max(totalAnterior, quantidadeNaData(d.data));
+        if (modAtual.limite == null || maior(jaSolicitado + d.quantidade, modAtual.limite))
+          return erro(msgLimiteModalidade(modAtual, jaSolicitado, d.quantidade));
         const solRef = doc(db, 'solicitacoes', `${mod.id}_${d.data}_${n}`);
         try {
           const lote = writeBatch(db);
-          lote.set(contRef, { setorId: mod.id, data: d.data, n });
+          lote.set(contRef, { setorId: mod.id, data: d.data, n, total: arred(totalAnterior + d.quantidade) });
           // A solicitação não mexe no estoque: a baixa é feita no "Fornecido".
           lote.set(solRef, {
             modalidadeId: mod.id,
@@ -625,7 +647,8 @@
     ['modalidades', 'Setores e limites'],
     ['responsaveis', 'Responsáveis'],
     ['paioleiros', 'Paioleiros'],
-    ['administradores', 'Administradores']
+    ['administradores', 'Administradores'],
+    ['vales', 'Vales de Gêneros']
   ];
 
   async function garantirModalidades(exclusoes = []) {
@@ -646,11 +669,11 @@
       app.innerHTML = CARREGANDO;
       try {
         const exclusoes = await lista('exclusoes').catch(() => []);
-        const [modalidades, eventos, usuarios, solicitacoes, itens, movimentos, auditoria] = await Promise.all([
+        const [modalidades, eventos, usuarios, solicitacoes, itens, movimentos, auditoria, vales] = await Promise.all([
           garantirModalidades(exclusoes), lista('eventos').catch(() => []), lista('usuarios'), lista('solicitacoes'), lista('itens'), lista('movimentos'),
-          lista('auditoria').catch(() => [])
+          lista('auditoria').catch(() => []), lista('vales').catch(() => [])
         ]);
-        dados = { modalidades, eventos, usuarios, solicitacoes, itens, movimentos, exclusoes, auditoria };
+        dados = { modalidades, eventos, usuarios, solicitacoes, itens, movimentos, exclusoes, auditoria, vales };
       } catch (e) {
         return telaFalha('Administrador', e, () => telaAdmin(aba, '', true));
       }
@@ -928,27 +951,453 @@
     });
   }
 
+  /* ================= Vale Extraordinário de Gêneros (CN-42) ================= */
+  // Gera, em PDF, o modelo oficial "VALE EXTRAORDINÁRIO DE GÊNEROS" com os fornecimentos
+  // efetivamente realizados (status "Fornecido") numa data, um vale por item.
+  // A tabela lista apenas os setores; o total do item (em quantidade) fica no campo
+  // de total, embaixo. Sem numeração e sem valores em reais. Não altera estoque nem
+  // solicitações. Cada vale gerado fica registrado em "vales" para consulta.
+  const JSPDF_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/4.2.1/jspdf.umd.min.js';
+  let carregandoJsPDF = null;
+  function carregarJsPDF() {
+    if (window.jspdf && window.jspdf.jsPDF) return Promise.resolve(window.jspdf.jsPDF);
+    if (!carregandoJsPDF) carregandoJsPDF = new Promise((ok, falha) => {
+      const sc = document.createElement('script');
+      sc.src = JSPDF_URL; sc.async = true;
+      sc.onload = () => (window.jspdf && window.jspdf.jsPDF) ? ok(window.jspdf.jsPDF) : falha(new Error('jsPDF'));
+      sc.onerror = () => { carregandoJsPDF = null; falha(new Error('Não foi possível carregar o gerador de PDF. Verifique a internet.')); };
+      document.head.appendChild(sc);
+    });
+    return carregandoJsPDF;
+  }
+  const diaBrasilia = ts => { if (!ts || !ts.toMillis) return ''; const b = new Date(ts.toMillis() - FUSO_BRASILIA_MS); return isoData(b.getUTCFullYear(), b.getUTCMonth() + 1, b.getUTCDate()); };
+  const ordemNatural = (x, y) => String(x).localeCompare(String(y), 'pt-BR', { numeric: true, sensitivity: 'base' });
+  const chaveVale = (dt, itemId, setorId) => `${dt}_${itemId}_${setorId || 'todos'}`;
+
+  // Fornecimentos ("Fornecido") feitos na data, opcionalmente de um setor.
+  const fornecimentosDaData = (dt, setorId) => dados.solicitacoes.filter(s =>
+    statusDe(s) === 'fornecido' && diaBrasilia(s.fornecidoEm) === dt && (!setorId || s.modalidadeId === setorId));
+  // Itens que aparecem nos fornecimentos da data.
+  function itensFornecidosNaData(dt, setorId) {
+    const m = new Map();
+    fornecimentosDaData(dt, setorId).forEach(s => itensDaSolicitacao(s).forEach(i => { if (!m.has(i.id)) m.set(i.id, { id: i.id, nome: i.nome, unidade: i.unidade }); }));
+    return [...m.values()].sort((a, b) => ordemNatural(a.nome, b.nome));
+  }
+
+  // Monta o vale de UM item (sem gravar nada): uma linha por setor.
+  function montarVale(dt, itemId, setorId, complementares) {
+    const porSetor = new Map(), vistos = new Set(), paioleiros = new Set();
+    let unidade = '', nomeItem = '';
+    for (const s of fornecimentosDaData(dt, setorId)) {
+      const i = itensDaSolicitacao(s).find(x => x.id === itemId);
+      if (!i) continue;
+      const chave = `${s.id}|${i.id}`;              // impede duplicar o mesmo fornecimento
+      if (vistos.has(chave)) continue; vistos.add(chave);
+      unidade = i.unidade; nomeItem = i.nome;
+      if (s.fornecidoPorNome) paioleiros.add(s.fornecidoPorNome);
+      const setor = nomeSetor(s.modalidadeId);
+      const l = porSetor.get(s.modalidadeId) || { setor, uf: i.unidade, qtdSol: 0, qtdForn: 0, reduzido: false, solicitacoes: [] };
+      const forn = qtdFornecida(s, i);
+      l.qtdSol = arred(l.qtdSol + i.quantidade); l.qtdForn = arred(l.qtdForn + forn);
+      l.reduzido = l.reduzido || maior(i.quantidade, forn); l.solicitacoes.push(s.id);
+      porSetor.set(s.modalidadeId, l);
+    }
+    const linhas = [...porSetor.values()].sort((a, b) => ordemNatural(a.setor, b.setor))
+      .map(l => ({ setor: l.setor, uf: l.uf, qtdSol: l.qtdSol, qtdForn: l.qtdForn, obs: l.reduzido ? 'Reduzido' : '', solicitacoes: l.solicitacoes }));
+    return {
+      data: dt, itemId, itemNome: nomeItem, unidade, setorId: setorId || null,
+      setoresNomes: linhas.map(l => l.setor),
+      complementares: String(complementares || '').slice(0, 300),
+      linhas, paioleiros: [...paioleiros].sort(ordemNatural),
+      totalSol: arred(linhas.reduce((t, l) => t + l.qtdSol, 0)),
+      totalForn: arred(linhas.reduce((t, l) => t + l.qtdForn, 0)),
+      qtdFornecimentos: vistos.size
+    };
+  }
+
+  // Grava (ou atualiza) o registro do vale, para consulta e nova geração.
+  async function registrarVale(conteudo) {
+    const ref = doc(db, 'vales', chaveVale(conteudo.data, conteudo.itemId, conteudo.setorId));
+    const existente = await getDoc(ref);
+    const v = { ...conteudo, atualizadoEm: serverTimestamp(), geradoPorUid: perfil.uid, geradoPorNome: perfil.nome,
+      criadoEm: existente.exists() && existente.data().criadoEm ? existente.data().criadoEm : serverTimestamp(),
+      geracoes: existente.exists() ? (existente.data().geracoes || 1) + 1 : 1 };
+    await setDoc(ref, v);
+    return { ...v, id: ref.id };
+  }
+
+  // ---------- Desenho do PDF (página Carta, medidas do modelo CN-42, em pontos) ----------
+  const VALE_COLS = [63.8, 291.6, 317.1, 359.7, 405.0, 464.3, 510.1, 545.7];   // ITEM | UF | QTD.SOL. | QTD.FORN. | PREÇO UNIT. | PREÇO TOTAL | OBS.
+  const VALE_RODAPE = [63.8, 171.8, 248.8, 328.0, 413.0, 483.2, 545.7];
+  const VALE_LINHAS_POR_PAGINA = 26, VALE_ALT_LINHA = 14.3, VALE_TOPO_TABELA = 181.8, VALE_FIM_CAB = 210.0;
+
+  // vales: lista de vales (um por item); cada um ocupa uma ou mais páginas.
+  function desenharValePDF(JsPDF, vales, assinaturas = {}) {
+    const pdf = new JsPDF({ unit: 'pt', format: 'letter' });
+    const T = (txt, x, y, tam, est = 'normal', alinh = 'left', larguraMax) => {
+      pdf.setFont('times', est); let t = tam; pdf.setFontSize(t);
+      if (larguraMax) while (t > 4 && pdf.getTextWidth(String(txt)) > larguraMax) { t -= 0.25; pdf.setFontSize(t); }
+      pdf.text(String(txt), x, y, { align: alinh });
+    };
+    const caber = (txt, larg) => {                    // corta com "…" se não couber nem em 5pt
+      pdf.setFont('times', 'normal'); pdf.setFontSize(5); let t = String(txt);
+      if (pdf.getTextWidth(t) <= larg) return t;
+      while (t.length > 1 && pdf.getTextWidth(t + '…') > larg) t = t.slice(0, -1);
+      return t + '…';
+    };
+    let primeira = true;
+    for (const v of vales) {
+      const paginas = Math.max(1, Math.ceil(v.linhas.length / VALE_LINHAS_POR_PAGINA));
+      const [a, m, d] = v.data.split('-');
+      for (let pg = 0; pg < paginas; pg++) {
+        if (!primeira) pdf.addPage('letter'); primeira = false;
+        pdf.setLineWidth(0.5); pdf.setDrawColor(0); pdf.setTextColor(0);
+        // Cabeçalho (igual ao modelo; código do usuário e n.º do documento em branco)
+        T('RAMON GROSSO DE ALMEIDA', 109.0, 49.2, 6.5, 'normal', 'center');
+        T('Capitão de Fragata', 107.5, 58.4, 9, 'normal', 'center');
+        T('Agente Fiscal', 105.2, 67.0, 9, 'normal', 'center');
+        T('MARINHA DO BRASIL', 296.4, 42.3, 10.75, 'normal', 'center');
+        T('COLÉGIO NAVAL', 299.5, 58.4, 10.75, 'normal', 'center');
+        T('VALE EXTRAORDINÁRIO DE GÊNEROS', 302.7, 76.5, 10.5, 'normal', 'center');
+        T('CÓD.DO USUÁRIO', 429.1, 31.9, 10.25);
+        T('_______________', 429.1, 43.5, 10.25);
+        T('N.º DO DOC.', 429.1, 55.0, 10.25);
+        T('_______________', 429.1, 66.6, 10.25);
+        T('CN-42', 429.1, 89.7, 10.25);
+        // Campos
+        T('LOCAL SOLICITANTE:', 63.9, 132.5, 10.25, 'bold');
+        pdf.setFont('times', 'normal'); pdf.setFontSize(7);
+        const local = pdf.getTextWidth(v.setoresNomes.join(', ')) > 364 ? 'Diversos setores (ver coluna ITEM)' : (v.setoresNomes.join(', ') || '—');
+        T(local, 180.0, 132.5, 10, 'normal', 'left', 364);
+        T('DATA : _______ / ________/ _________', 63.9, 144.4, 10.25, 'bold');
+        T(d, 118.1, 143.4, 10, 'normal', 'center'); T(m, 162.5, 143.4, 10, 'normal', 'center'); T(a, 211.1, 143.4, 10, 'normal', 'center');
+        T('PAGO EM:_____/_____/_________', 258.6, 144.4, 10.25, 'bold');
+        T('INFORMAÇÕES COMPLEMENTARES:', 63.9, 167.7, 10.25, 'bold');
+        const compl = [v.complementares, paginas > 1 ? `Página ${pg + 1} de ${paginas}.` : ''].filter(Boolean).join(' ');
+        if (compl) {
+          pdf.setFont('times', 'normal'); pdf.setFontSize(7.5);
+          pdf.splitTextToSize(compl, 545.7 - 252).slice(0, 2).forEach((t, k) => pdf.text(t, 252, 166.5 + k * 8));
+        }
+        // Tabela: uma linha por setor
+        const yFim = VALE_FIM_CAB + VALE_LINHAS_POR_PAGINA * VALE_ALT_LINHA;
+        pdf.rect(VALE_COLS[0], VALE_TOPO_TABELA, VALE_COLS[7] - VALE_COLS[0], yFim - VALE_TOPO_TABELA);
+        VALE_COLS.slice(1, 7).forEach(x => pdf.line(x, VALE_TOPO_TABELA, x, yFim));
+        for (let k = 0; k <= VALE_LINHAS_POR_PAGINA; k++) { const y = VALE_FIM_CAB + k * VALE_ALT_LINHA; pdf.line(VALE_COLS[0], y, VALE_COLS[7], y); }
+        const cx = k => (VALE_COLS[k] + VALE_COLS[k + 1]) / 2;
+        const larg = k => VALE_COLS[k + 1] - VALE_COLS[k] - 4;
+        T('ITEM', cx(0), 199.0, 9.25, 'bold', 'center'); T('UF', cx(1), 199.0, 9.25, 'bold', 'center');
+        T('QTD.', cx(2), 193.8, 9.25, 'bold', 'center'); T('SOL.', cx(2), 204.2, 9.25, 'bold', 'center');
+        T('QTD.', cx(3), 193.8, 9.25, 'bold', 'center'); T('FORN.', cx(3), 204.2, 9.25, 'bold', 'center');
+        T('PREÇO', cx(4), 193.8, 9.25, 'bold', 'center'); T('UNITÁRIO', cx(4), 204.2, 9.25, 'bold', 'center');
+        T('PREÇO', cx(5), 193.8, 9.25, 'bold', 'center'); T('TOTAL', cx(5), 204.2, 9.25, 'bold', 'center');
+        T('OBS.', cx(6), 199.0, 9.25, 'bold', 'center');
+        v.linhas.slice(pg * VALE_LINHAS_POR_PAGINA, (pg + 1) * VALE_LINHAS_POR_PAGINA).forEach((l, k) => {
+          const y = VALE_FIM_CAB + k * VALE_ALT_LINHA + 10.2;
+          T(caber(l.setor, 220), VALE_COLS[0] + 4, y, 8.5, 'normal', 'left', 220);
+          T(l.uf || '', cx(1), y, 8, 'normal', 'center', larg(1));
+          T(fmtQtd(l.qtdSol), cx(2), y, 8.5, 'normal', 'center', larg(2));
+          T(fmtQtd(l.qtdForn), cx(3), y, 8.5, 'normal', 'center', larg(3));
+          if (l.obs) T(l.obs, cx(6), y, 6, 'normal', 'center', larg(6));
+        });
+        // Total (em quantidade fornecida, na unidade do item) — na última página do vale
+        const ultima = pg === paginas - 1;
+        const yT = yFim, yTb = yT + 28.1;
+        pdf.line(291.6, yT, 291.6, yTb); pdf.line(545.7, yT, 545.7, yTb); pdf.line(291.4, yTb, 546.0, yTb);
+        pdf.line(427.9, yT, 427.9, yTb); pdf.line(464.3, yT, 464.3, yTb);
+        pdf.setLineWidth(0.75); pdf.line(414.2, yT + 22.7, 486.2, yT + 22.7); pdf.setLineWidth(0.5);
+        T('TOTAL', 331.2, 599.3, 10.25, 'bold');
+        if (ultima) T(qtdUn(v.totalForn, v.unidade), 505.0, 599.0, 10, 'bold', 'center', 76);
+        else T('continua', 505.0, 599.0, 8, 'normal', 'center');
+        // Assinaturas (iguais ao modelo; o campo PAIOLEIRO recebe quem forneceu)
+        const yR = 621.9, yM = 661.5, yB = 684.5;
+        pdf.rect(VALE_RODAPE[0], yR, VALE_RODAPE[6] - VALE_RODAPE[0], yB - yR);
+        VALE_RODAPE.slice(1, 6).forEach(x => pdf.line(x, yR, x, yB));
+        pdf.line(VALE_RODAPE[0], yM, VALE_RODAPE[6], yM);
+        const rc = k => (VALE_RODAPE[k] + VALE_RODAPE[k + 1]) / 2;
+        T('Assinatura do Encarregado do setor', rc(0), 628.6, 7.25, 'normal', 'center'); T('solicitante:', rc(0), 636.7, 7.25, 'normal', 'center');
+        T('Assinatura do Chefe de', rc(1), 628.6, 7.25, 'normal', 'center'); T('Dep. do setor solicitante:', rc(1), 636.7, 7.25, 'normal', 'center');
+        T('FIEL DE MUNICIAMENTO', 252.8, 627.7, 6.25);
+        T('Autorizado por:', 331.6, 628.6, 7.25);
+        T('ENTREGUE POR:', 416.6, 628.6, 7.25);
+        T('RECEBIDO POR:', 486.8, 628.6, 7.25);
+        T('JOSÉ SAMUEL CALDAS ALVES', rc(2), 666.4, 5.25, 'normal', 'center');
+        T('Segundo-Sargento  (CO)', rc(2), 672.1, 5.25, 'normal', 'center');
+        T('Fiel de Municiamento', rc(2), 677.9, 5.25, 'normal', 'center');
+        T('MARIANA CARVALHO TARANTO', rc(3), 665.5, 4.25, 'normal', 'center');
+        T('Segundo-Tenente (RM2-S)', rc(3), 671.0, 5.25, 'normal', 'center');
+        T('Gestor de Municiamento', rc(3), 676.7, 5.25, 'normal', 'center');
+        // Imagens das assinaturas: logo abaixo do título de cada campo, no espaço acima do nome
+        desenharAssinatura(pdf, assinaturas.fiel, VALE_RODAPE[2] + 2.5, 630.6, VALE_RODAPE[3] - VALE_RODAPE[2] - 5, 30.0);
+        desenharAssinatura(pdf, assinaturas.autorizado, VALE_RODAPE[3] + 2.5, 631.2, VALE_RODAPE[4] - VALE_RODAPE[3] - 5, 29.4);
+        T('PAIOLEIRO:', rc(4), 666.4, 5.25, 'normal', 'center');
+        if (v.paioleiros.length) T(v.paioleiros.join(', '), rc(4), 674.5, 5.25, 'normal', 'center', VALE_RODAPE[5] - VALE_RODAPE[4] - 4);
+        T('POSTO/GRAD/NOME', rc(5), 666.4, 5.25, 'normal', 'center');
+      }
+    }
+    return pdf;
+  }
+
+  // Coloca a imagem centralizada dentro da caixa (x, y, larg, alt), mantendo a proporção.
+  function desenharAssinatura(pdf, a, x, y, larg, alt) {
+    if (!a || !a.imagem || !a.largura || !a.altura) return;
+    const k = Math.min(larg / a.largura, alt / a.altura);
+    const w = a.largura * k, h = a.altura * k;
+    try { pdf.addImage(a.imagem, 'PNG', x + (larg - w) / 2, y + (alt - h) / 2, w, h); } catch (e) { /* imagem inválida: segue sem ela */ }
+  }
+
+  async function carregarAssinaturas() {
+    const r = {};
+    await Promise.all(CAMPOS_ASSINATURA.map(async c => {
+      try { const s = await getDoc(doc(db, 'assinaturas', c.id)); if (s.exists()) r[c.id] = s.data(); } catch (e) { /* sem permissão ou sem assinatura */ }
+    }));
+    return r;
+  }
+
+  async function baixarValePDF(vales) {
+    const [JsPDF, assinaturas] = await Promise.all([carregarJsPDF(), carregarAssinaturas()]);
+    const pdf = desenharValePDF(JsPDF, vales, assinaturas);
+    const nome = vales.length === 1 ? vales[0].itemNome.replace(/[^\wÀ-ÿ-]+/g, '_') : 'todos_os_itens';
+    pdf.save(`Vale_Generos_CN-42_${fmtData(vales[0].data).replace(/\//g, '-')}_${nome}.pdf`);
+    return pdf;
+  }
+
+  // ---------- Tela "Gerar Vale de Gêneros" (Paioleiro e Administrador) ----------
+  function painelVales(alvo, ctx) {
+    const hoje = hojeISO();
+    const setoresComForn = dt => [...new Set(fornecimentosDaData(dt).map(s => s.modalidadeId))]
+      .map(id => ({ id, nome: nomeSetor(id) })).sort((x, y) => ordemNatural(x.nome, y.nome));
+    const vales = (dados.vales || []).slice().sort((x, y) => (y.data || '').localeCompare(x.data || '') || ordemNatural(x.itemNome || '', y.itemNome || ''));
+    const desenhar = (dt, setorSel, itemSel, compl) => {
+      const itens = itensFornecidosNaData(dt, setorSel);
+      if (itemSel && !itens.some(i => i.id === itemSel)) itemSel = '';
+      const alvoItens = itemSel ? itens.filter(i => i.id === itemSel) : itens;
+      const conteudos = alvoItens.map(i => montarVale(dt, i.id, setorSel, compl)).filter(v => v.linhas.length);
+      alvo.innerHTML = `
+      <section class="card">
+        <h2>📄 Vale Extraordinário de Gêneros (CN-42)</h2>
+        <p class="muted small" style="margin-top:-.3rem">Um vale por item, com os fornecimentos efetivamente realizados na data (somente "Fornecido", com as quantidades fornecidas). A tabela lista os setores e o total do item, em quantidade, aparece embaixo. O estoque e as solicitações não são alterados.</p>
+        <div class="grade">
+          <label>Data do fornecimento<input type="date" id="valeData" value="${esc(dt)}" max="${hoje}"></label>
+          <label>Item
+            <select id="valeItem">
+              ${itens.length ? `<option value="">Todos os itens (um vale para cada)</option>` : '<option value="">Nenhum item fornecido nesta data</option>'}
+              ${itens.map(i => `<option value="${i.id}" ${i.id === itemSel ? 'selected' : ''}>${esc(i.nome)} (${esc(i.unidade)})</option>`).join('')}
+            </select></label>
+          <label>Setor
+            <select id="valeSetor"><option value="">Todos os setores da data</option>
+              ${setoresComForn(dt).map(s => `<option value="${s.id}" ${s.id === setorSel ? 'selected' : ''}>${esc(s.nome)}</option>`).join('')}
+            </select></label>
+        </div>
+        <label>Informações complementares (opcional)<input id="valeCompl" maxlength="300" value="${esc(compl || '')}" placeholder="Texto que aparecerá no campo INFORMAÇÕES COMPLEMENTARES"></label>
+        <div class="resumo-vale">
+          ${conteudos.length
+            ? conteudos.map(v => `<strong>${esc(v.itemNome)}</strong>: ${plural(v.linhas.length, 'setor', 'setores')} (${esc(v.setoresNomes.join(', '))}) · total fornecido <strong>${esc(qtdUn(v.totalForn, v.unidade))}</strong>`).join('<br>')
+            : 'Nenhum fornecimento (status "Fornecido") nesta data.'}
+        </div>
+        <div class="erro" id="erroVale"></div>
+        <div class="acoes"><button class="btn primario" id="btnGerarVale" ${conteudos.length ? '' : 'disabled'}>Gerar Vale de Gêneros (PDF)${conteudos.length > 1 ? ` — ${conteudos.length} vales` : ''}</button></div>
+      </section>
+      <section class="card">
+        <h2>Vales gerados</h2>
+        ${vales.length ? `<div class="tabela-wrap"><table>
+          <thead><tr><th>Data</th><th>Item</th><th>Setores</th><th class="num">Total fornecido</th><th>Gerado por</th><th></th></tr></thead>
+          <tbody>${vales.map(x => `<tr>
+            <td>${esc(fmtData(x.data))}</td><td><strong>${esc(x.itemNome || '—')}</strong></td><td>${esc((x.setoresNomes || []).join(', '))}</td>
+            <td class="num">${esc(qtdUn(x.totalForn || 0, x.unidade))}</td><td>${esc(x.geradoPorNome || '—')}<div class="small muted">${fmtDataHora(x.atualizadoEm)}</div></td>
+            <td class="num"><button class="btn secundario pequeno" data-baixar-vale="${x.id}">Baixar PDF</button></td>
+          </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhum vale gerado ainda.</p>'}
+      </section>`;
+      const erro = msg => { $('erroVale').textContent = msg; };
+      const atual = () => [$('valeSetor').value, $('valeItem').value, $('valeCompl').value];
+      $('valeData').onchange = () => { alvo.dataset.valeData = $('valeData').value; desenhar($('valeData').value, '', '', $('valeCompl').value); };
+      $('valeSetor').onchange = () => desenhar(dt, ...atual());
+      $('valeItem').onchange = () => desenhar(dt, ...atual());
+      $('btnGerarVale').onclick = () => comBotao($('btnGerarVale'), async () => {
+        try {
+          const [setor, itemId, compl2] = atual();
+          const alvoIds = itemId ? [itemId] : itensFornecidosNaData(dt, setor).map(i => i.id);
+          const lista = alvoIds.map(id => montarVale(dt, id, setor, compl2)).filter(v => v.linhas.length);
+          if (!lista.length) return erro('Nenhum fornecimento nesta data.');
+          const registrados = [];
+          for (const v of lista) registrados.push(await registrarVale(v));
+          await baixarValePDF(registrados);
+          ctx.recarregar(`${plural(registrados.length, 'Vale de Gêneros gerado', 'Vales de Gêneros gerados')} para ${fmtData(dt)}.`);
+        } catch (e) { erro(e.message && !e.code ? e.message : 'Não foi possível gerar o vale: ' + msgErro(e)); }
+      });
+      alvo.querySelectorAll('[data-baixar-vale]').forEach(b => b.onclick = () => comBotao(b, async () => {
+        const x = vales.find(y => y.id === b.dataset.baixarVale);
+        try { await baixarValePDF([x]); } catch (e) { erro(e.message || msgErro(e)); }
+      }));
+    };
+    desenhar(alvo.dataset.valeData || hoje, '', '', '');
+  }
+
+  /* ================= Assinaturas do Vale (imagens) ================= */
+  // Guardadas no próprio Firestore (coleção "assinaturas"), sem Firebase Storage,
+  // para não depender de recurso pago. A imagem é tratada no navegador:
+  // o fundo do papel fica transparente e a assinatura é recortada e reduzida.
+  const CAMPOS_ASSINATURA = [
+    { id: 'fiel', titulo: 'Fiel de Municiamento', ajuda: 'Aparece no campo FIEL DE MUNICIAMENTO do vale.' },
+    { id: 'autorizado', titulo: 'Autorizado por', ajuda: 'Aparece no campo "Autorizado por:" do vale.' }
+  ];
+  const ASSIN_MAX_LARG = 600, ASSIN_MAX_ALT = 300, ASSIN_MAX_BYTES = 600000;
+
+  // Recebe os pixels RGBA e devolve a assinatura recortada com fundo transparente.
+  function limparAssinatura(px, w, h) {
+    const lum = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) lum[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
+    // Fundo estimado por blocos (compensa sombra e iluminação desigual da foto)
+    const tam = Math.max(16, Math.round(Math.max(w, h) / 20));
+    const gw = Math.ceil(w / tam), gh = Math.ceil(h / tam), grade = new Float32Array(gw * gh);
+    for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) {
+      const hist = new Uint32Array(256); let n = 0;
+      for (let y = gy * tam; y < Math.min(h, (gy + 1) * tam); y++) for (let x = gx * tam; x < Math.min(w, (gx + 1) * tam); x++) { hist[lum[y * w + x] | 0]++; n++; }
+      let acum = 0, v = 255; const alvo = n * 0.6;            // 60% mais escuros ficam abaixo: o papel domina o bloco
+      for (let k = 0; k < 256; k++) { acum += hist[k]; if (acum >= alvo) { v = k; break; } }
+      grade[gy * gw + gx] = v;
+    }
+    const fundo = (x, y) => {                                 // interpolação bilinear entre os blocos
+      const fx = Math.min(Math.max(x / tam - 0.5, 0), gw - 1), fy = Math.min(Math.max(y / tam - 0.5, 0), gh - 1);
+      const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(x0 + 1, gw - 1), y1 = Math.min(y0 + 1, gh - 1), ax = fx - x0, ay = fy - y0;
+      const g = (a, b) => grade[b * gw + a];
+      return (g(x0, y0) * (1 - ax) + g(x1, y0) * ax) * (1 - ay) + (g(x0, y1) * (1 - ax) + g(x1, y1) * ax) * ay;
+    };
+    const alfa = new Float32Array(w * h);
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x, a = Math.min(1, Math.max(0, (fundo(x, y) - lum[i] - 18) / 45));
+      alfa[i] = a;
+      if (a > 0.35) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    }
+    if (x1 < 0) return null;
+    const pad = Math.round(Math.max(w, h) * 0.01) + 2;
+    x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad); x1 = Math.min(w - 1, x1 + pad); y1 = Math.min(h - 1, y1 + pad);
+    const cw = x1 - x0 + 1, ch = y1 - y0 + 1, out = new Uint8ClampedArray(cw * ch * 4);
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+      const i = (y + y0) * w + (x + x0), o = (y * cw + x) * 4;
+      out[o] = px[i * 4] * 0.6; out[o + 1] = px[i * 4 + 1] * 0.6; out[o + 2] = px[i * 4 + 2] * 0.6;   // tinta um pouco mais forte, mantendo a cor
+      out[o + 3] = alfa[i] * 255;
+    }
+    return { pixels: out, largura: cw, altura: ch };
+  }
+
+  function lerImagem(arquivo) {
+    return new Promise((ok, falha) => {
+      const url = URL.createObjectURL(arquivo), img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); ok(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); falha(new Error('Não foi possível abrir a imagem. Use um arquivo JPG ou PNG.')); };
+      img.src = url;
+    });
+  }
+
+  async function prepararAssinatura(arquivo) {
+    if (!arquivo || !/^image\//.test(arquivo.type)) throw new Error('Escolha um arquivo de imagem (JPG ou PNG).');
+    const img = await lerImagem(arquivo);
+    const red = Math.min(1, 1400 / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * red)), h = Math.max(1, Math.round(img.naturalHeight * red));
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    const c = cv.getContext('2d'); c.fillStyle = '#fff'; c.fillRect(0, 0, w, h); c.drawImage(img, 0, 0, w, h);
+    const r = limparAssinatura(c.getImageData(0, 0, w, h).data, w, h);
+    if (!r) throw new Error('Não foi possível identificar a assinatura na imagem. Use uma foto nítida, em papel branco.');
+    const recorte = document.createElement('canvas'); recorte.width = r.largura; recorte.height = r.altura;
+    recorte.getContext('2d').putImageData(new ImageData(r.pixels, r.largura, r.altura), 0, 0);
+    for (let fator = 1; fator >= 0.3; fator -= 0.15) {
+      const e = Math.min(1, ASSIN_MAX_LARG / r.largura, ASSIN_MAX_ALT / r.altura) * fator;
+      const fw = Math.max(1, Math.round(r.largura * e)), fh = Math.max(1, Math.round(r.altura * e));
+      const fin = document.createElement('canvas'); fin.width = fw; fin.height = fh;
+      const fc = fin.getContext('2d'); fc.imageSmoothingQuality = 'high'; fc.drawImage(recorte, 0, 0, fw, fh);
+      const imagem = fin.toDataURL('image/png');
+      if (imagem.length <= ASSIN_MAX_BYTES) return { imagem, largura: fw, altura: fh };
+    }
+    throw new Error('A imagem ficou grande demais. Recorte a foto deixando só a assinatura e tente novamente.');
+  }
+
+  // Seção do Administrador (aba "Vales de Gêneros") para cadastrar as imagens.
+  async function painelAssinaturas(alvo, ctx) {
+    alvo.innerHTML = `<section class="card"><h2>✍️ Assinaturas do Vale</h2><p class="muted">Carregando…</p></section>`;
+    const atuais = await carregarAssinaturas();
+    const novas = {};
+    const desenhar = () => {
+      alvo.innerHTML = `
+      <section class="card">
+        <h2>✍️ Assinaturas do Vale</h2>
+        <p class="muted small" style="margin-top:-.3rem">Envie a foto ou o escaneamento de cada assinatura (de preferência em papel branco). O sistema remove o fundo, recorta a assinatura e a imprime em todos os vales gerados, logo abaixo do título do campo.</p>
+        <div class="assin-grade">
+          ${CAMPOS_ASSINATURA.map(c => {
+            const nova = novas[c.id], atual = atuais[c.id], mostra = nova || atual;
+            return `<div class="assin-campo">
+              <h3>${esc(c.titulo)}</h3>
+              <p class="small muted">${esc(c.ajuda)}</p>
+              <div class="assin-previa">${mostra ? `<img src="${mostra.imagem}" alt="Assinatura — ${esc(c.titulo)}">` : '<span class="muted small">Nenhuma assinatura cadastrada</span>'}</div>
+              ${nova ? '<p class="small"><strong>Prévia da nova imagem</strong> — clique em “Salvar assinatura” para usar.</p>'
+                : (atual ? `<p class="small muted">Atualizada por ${esc(atual.atualizadoPorNome || '—')} · ${fmtDataHora(atual.atualizadoEm)}</p>` : '')}
+              <label>Imagem da assinatura<input type="file" accept="image/*" data-assin-arquivo="${c.id}"></label>
+              <div class="acoes">
+                <button class="btn primario" data-assin-salvar="${c.id}" ${nova ? '' : 'disabled'}>Salvar assinatura</button>
+                ${atual && !nova ? `<button class="btn secundario" data-assin-remover="${c.id}">Remover</button>` : ''}
+                ${nova ? `<button class="btn secundario" data-assin-cancelar="${c.id}">Cancelar</button>` : ''}
+              </div>
+              <div class="erro" id="erroAssin_${c.id}"></div>
+            </div>`;
+          }).join('')}
+        </div>
+      </section>`;
+      alvo.querySelectorAll('[data-assin-arquivo]').forEach(inp => inp.onchange = async () => {
+        const id = inp.dataset.assinArquivo, erro = $('erroAssin_' + id);
+        erro.textContent = 'Processando imagem…';
+        try { novas[id] = await prepararAssinatura(inp.files[0]); desenhar(); }
+        catch (e) { erro.textContent = e.message || 'Não foi possível processar a imagem.'; inp.value = ''; }
+      });
+      alvo.querySelectorAll('[data-assin-cancelar]').forEach(b => b.onclick = () => { delete novas[b.dataset.assinCancelar]; desenhar(); });
+      alvo.querySelectorAll('[data-assin-salvar]').forEach(b => b.onclick = () => comBotao(b, async () => {
+        const id = b.dataset.assinSalvar, n = novas[id];
+        try {
+          await setDoc(doc(db, 'assinaturas', id), {
+            imagem: n.imagem, largura: n.largura, altura: n.altura,
+            atualizadoEm: serverTimestamp(), atualizadoPor: perfil.uid, atualizadoPorNome: perfil.nome
+          });
+          ctx.recarregar(`Assinatura "${CAMPOS_ASSINATURA.find(c => c.id === id).titulo}" salva. Ela será impressa nos próximos vales.`);
+        } catch (e) { $('erroAssin_' + id).textContent = 'Não foi possível salvar: ' + msgErro(e); }
+      }));
+      alvo.querySelectorAll('[data-assin-remover]').forEach(b => b.onclick = () => comBotao(b, async () => {
+        const id = b.dataset.assinRemover, c = CAMPOS_ASSINATURA.find(x => x.id === id);
+        if (!confirm(`Remover a assinatura "${c.titulo}"? Os próximos vales sairão sem ela.`)) return;
+        try { const lote = writeBatch(db); lote.delete(doc(db, 'assinaturas', id)); await lote.commit(); ctx.recarregar(`Assinatura "${c.titulo}" removida.`); }
+        catch (e) { $('erroAssin_' + id).textContent = 'Não foi possível remover: ' + msgErro(e); }
+      }));
+    };
+    desenhar();
+  }
+
   /* ================= Paioleiro ================= */
   // Vê apenas solicitações autorizadas ("Pedido Recebido") e as já fornecidas,
   // e só pode marcar "Fornecido" (com baixa no estoque).
   async function telaPaioleiro(mensagem) {
     app.innerHTML = CARREGANDO;
     try {
-      const [modalidades, eventos, solicitacoes] = await Promise.all([
+      const [modalidades, eventos, solicitacoes, itens, vales] = await Promise.all([
         lista('modalidades'), lista('eventos').catch(() => []),
-        listaConsulta(query(collection(db, 'solicitacoes'), where('status', 'in', ['recebido', 'fornecido'])))
+        listaConsulta(query(collection(db, 'solicitacoes'), where('status', 'in', ['recebido', 'fornecido']))),
+        lista('itens').catch(() => []), lista('vales').catch(() => [])
       ]);
-      dados = { ...vazio(), modalidades: ordenarModalidades(modalidades), eventos, solicitacoes };
+      dados = { ...vazio(), modalidades: ordenarModalidades(modalidades), eventos, solicitacoes, itens, vales };
     } catch (e) {
       return telaFalha('Paioleiro', e, () => telaPaioleiro());
     }
     app.innerHTML = cabecalho('Paioleiro', true) + `
       <main class="conteudo">
         ${mensagem ? `<div class="aviso">${esc(mensagem)}</div>` : ''}
+        <div class="acoes" style="margin:0 0 1rem"><button class="btn primario" id="btnAbrirVale">📄 Gerar Vale de Gêneros</button></div>
+        <div id="areaVale" hidden></div>
         <div id="painel"></div>
       </main>`;
     ligarSair();
     $('btnAtualizar').onclick = () => telaPaioleiro();
+    $('btnAbrirVale').onclick = () => {
+      const area = $('areaVale'); area.hidden = !area.hidden;
+      $('btnAbrirVale').textContent = area.hidden ? '📄 Gerar Vale de Gêneros' : 'Fechar Vale de Gêneros';
+      if (!area.hidden) painelVales(area, { recarregar: msg => telaPaioleiro(msg) });
+    };
     PAINEIS.solicitacoes($('painel'));
   }
 
@@ -1490,11 +1939,11 @@
     modalidades(p) {
       p.innerHTML = `<section class="card">
         <h2>Setores e limites</h2>
-        <p class="muted small" style="margin-top:-.3rem"><strong>Quantidade máxima por solicitação</strong>: limite da quantidade de cada pedido (aceita decimais).
-          <strong>Limite de pedidos por dia</strong>: quantas solicitações o setor pode registrar na mesma data (padrão: 1). A contagem recomeça a cada data.</p>
+        <p class="muted small" style="margin-top:-.3rem"><strong>Limite de quantidade por dia</strong>: soma máxima das quantidades de todos os pedidos do setor na mesma data (aceita decimais).
+          <strong>Limite de pedidos por dia</strong>: quantas solicitações o setor pode registrar na mesma data (padrão: 1). Os dois limites valem ao mesmo tempo e a contagem recomeça a cada data.</p>
         <form id="fMod" novalidate>
           <div class="tabela-wrap"><table>
-            <thead><tr><th>#</th><th>Setor</th><th>Quantidade máxima por solicitação</th><th>Limite de pedidos por dia</th><th>Responsável</th><th></th></tr></thead>
+            <thead><tr><th>#</th><th>Setor</th><th>Limite de quantidade por dia</th><th>Limite de pedidos por dia</th><th>Responsável</th><th></th></tr></thead>
             <tbody>${dados.modalidades.map((m, i) => {
               const resp = dados.usuarios.find(u => u.modalidadeId === m.id);
               return `<tr>
@@ -1521,7 +1970,7 @@
           const limite = paraNumero(f.get('lim_' + m.id));
           const limiteDiario = paraInteiro(f.get('dia_' + m.id));
           if (!nome) return erro('Todos os setores precisam de um nome.');
-          if (Number.isNaN(limite)) return erro(`Quantidade máxima inválida para "${nome}" (${DICA_DECIMAL}; até 3 casas decimais).`);
+          if (Number.isNaN(limite)) return erro(`Limite de quantidade por dia inválido para "${nome}" (${DICA_DECIMAL}; até 3 casas decimais).`);
           if (limiteDiario == null || Number.isNaN(limiteDiario) || limiteDiario < 1) return erro(`Limite de pedidos por dia inválido para "${nome}" (número inteiro, 1 ou mais).`);
           novos.push({ m, nome, limite, limiteDiario });
         }
@@ -1538,6 +1987,14 @@
           } catch (err) { erro(msgErro(err)); }
         });
       };
+    },
+
+    /* ---- Vales de Gêneros (CN-42) ---- */
+    vales(p) {
+      const ctx = { recarregar: msg => telaAdmin('vales', msg, true) };
+      p.innerHTML = '<div id="valeGerar"></div><div id="valeAssinaturas"></div>';
+      painelVales($('valeGerar'), ctx);
+      painelAssinaturas($('valeAssinaturas'), ctx);
     },
 
     /* ---- Administradores ---- */
