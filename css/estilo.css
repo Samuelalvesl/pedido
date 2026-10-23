@@ -382,3 +382,11 @@ img{max-width:100%}
   .tabela-wrap .tabela-saldo td::before{display:none}
   .tabela-wrap .tabela-saldo td.num{text-align:right}
 }
+
+/* ===== Minimizar / expandir solicitações por data ===== */
+.btn-grupo{display:inline-flex;align-items:center;gap:.3rem;border:1px solid rgba(255,255,255,.45);background:rgba(255,255,255,.14);color:#fff;border-radius:99px;padding:.25rem .75rem;font:inherit;font-size:.8rem;font-weight:700;cursor:pointer;white-space:nowrap}
+.btn-grupo:hover{background:rgba(255,255,255,.26)}
+.btn-grupo:focus-visible{outline:2px solid #fff;outline-offset:2px}
+tr.grupo-data.recolhido td{opacity:.92}
+.tabela-wrap tr[hidden]{display:none !important}
+@media (pointer:coarse){.btn-grupo{min-height:40px;padding:.35rem .9rem}}

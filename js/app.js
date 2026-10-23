@@ -67,6 +67,7 @@
   let mensagemLogin = '';
   let dados = vazio();
   let filtroSolicitacoes = 'todas';
+  const gruposRecolhidos = new Set();   // datas minimizadas na lista de solicitações do Administrador
   let filtroData = 'todas';
   const filtroHistorico = { tipo: '', de: '', ate: '', admin: '' }; // filtros do Histórico de Exclusões   // data da retirada selecionada no painel de solicitações
   // Quem está usando o painel de solicitações (Administrador ou Paioleiro).
@@ -256,6 +257,7 @@
     mesCalendario = null;   // o calendário volta ao mês atual no próximo acesso
     dataSelecionada = null;
     filtroData = 'todas';
+    gruposRecolhidos.clear();
     await signOut(auth);
   }
 
@@ -1516,7 +1518,7 @@
         if (st === 'pendente' && !paioleiro)
           return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-receber="${s.id}">Pedido Recebido</button></div>`;
         if (st === 'recebido')
-          return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-fornecer="${s.id}">✓ Fornecido</button></div>`;
+          return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-fornecer="${s.id}">FORNECER</button></div>`;
         if (st === 'fornecido')
           return `<div style="margin-top:.35rem"><button class="btn secundario pequeno" disabled title="Esta solicitação já foi fornecida">✓ Fornecido</button></div>`;
         return '';
@@ -1533,6 +1535,8 @@
         return e.length ? e.map(([n, v]) => `${esc(n)}: <strong>${esc(qtdUn(v.q, v.un))}</strong>`).join(' · ') : 'tudo fornecido';
       }
 
+      const recolhivel = !paioleiro;                  // minimizar/expandir: área do Administrador
+      const fechado = dt => recolhivel && gruposRecolhidos.has(dt);
       const porData = [...new Set(visiveis.map(dataDe))].sort(ordemDatas).map(dt => ({
         dt, lista: visiveis.filter(s => dataDe(s) === dt).sort((x, y) => (modalidade(x.modalidadeId)?.nome || '').localeCompare(modalidade(y.modalidadeId)?.nome || ''))
       }));
@@ -1546,7 +1550,7 @@
       <section class="card">
         <h2>${paioleiro ? 'Solicitações autorizadas' : 'Solicitações por data'}</h2>
         <p class="muted small" style="margin-top:-.3rem">${paioleiro
-          ? 'Aqui aparecem as solicitações autorizadas pelo Administrador ("Pedido Recebido"). Ao entregar o pedido, clique em "Fornecido": a baixa no estoque é feita nesse momento.'
+          ? 'Aqui aparecem as solicitações autorizadas pelo Administrador ("Pedido Recebido"). Ao entregar o pedido, clique em "FORNECER" e confirme: a baixa no estoque é feita nesse momento e o status passa para "Fornecido".'
           : 'Fluxo: Pendente → Pedido Recebido → Fornecido. A baixa no estoque ocorre somente no "Fornecido".'} Retirada sempre das ${RETIRADA_TEXTO}.</p>
         <div class="filtro-data">
           <label>Data da retirada
@@ -1572,19 +1576,19 @@
         ${porData.length ? `<div class="tabela-wrap"><table>
           <thead><tr><th>Setor</th><th class="num">Quantidade</th><th>Itens</th><th>Responsável</th><th>Registrada em</th><th>Status</th></tr></thead>
           <tbody>${porData.map(({ dt, lista }) => `
-            <tr class="grupo-data"><td colspan="6">
-              <div class="grupo-titulo">📅 ${esc(fmtDataSemana(dt))}${dt === hoje ? ' <span class="status recebido">hoje</span>' : ''}
+            <tr class="grupo-data${fechado(dt) ? ' recolhido' : ''}"><td colspan="6">
+              <div class="grupo-titulo">${recolhivel ? `<button type="button" class="btn-grupo" data-alternar-grupo="${dt}" aria-expanded="${!fechado(dt)}" title="${fechado(dt) ? 'Expandir' : 'Minimizar'} as solicitações desta data">${fechado(dt) ? '▼ Expandir' : '▲ Minimizar'}</button>` : ''}📅 ${esc(fmtDataSemana(dt))}${dt === hoje ? ' <span class="status recebido">hoje</span>' : ''}
                 <span class="grupo-info">Retirada ${RETIRADA_TEXTO} · ${plural(lista.length, 'solicitação', 'solicitações')} · Quantidade total: ${fmtQtd(soma(lista))}</span></div>
               <div class="grupo-itens">Itens a preparar: ${itensAPreparar(lista)}</div>
             </td></tr>
-            ${lista.map(s => `<tr class="${classeLinha(s)}">
+            ${lista.map(s => `<tr class="${classeLinha(s)}" data-grupo-de="${dt}" ${fechado(dt) ? 'hidden' : ''}>
               <td>${!paioleiro && grupoDe(s) === 'fornecidos' ? `<input type="checkbox" class="caixa" data-sel-sol="${s.id}" aria-label="Selecionar para excluir do histórico" style="margin-right:.35rem">` : ''}<strong>${esc(nomeSetor(s.modalidadeId))}</strong></td>
               <td class="num">${fmtQtd(s.quantidade)}</td>
               <td>${listaItensHtml(s)}</td>
               <td>${esc(s.usuarioNome || '—')}</td>
               <td>${fmtDataHora(s.criadoEm)}</td>
               <td>${seloStatus(s)}${historicoStatus(s)}${acoes(s)}</td>
-            </tr>${temAlteracoes(s) ? `<tr class="linha-registro"><td colspan="6">
+            </tr>${temAlteracoes(s) ? `<tr class="linha-registro" data-grupo-de="${dt}" ${fechado(dt) ? 'hidden' : ''}><td colspan="6">
               <div class="registro-titulo">Registro de Alterações na Quantidade</div>
               ${tabelaRegistro(s.alteracoes, s.fornecidoPorNome, fmtDataHora(s.fornecidoEm))}
             </td></tr>` : ''}`).join('')}`).join('')}</tbody></table></div>` : '<p class="muted">Nenhuma solicitação neste filtro.</p>'}
@@ -1608,6 +1612,16 @@
             return { id, descricao: `${fmtData(dataDe(s))} · ${nomeSetor(s.modalidadeId)} · ${s.usuarioNome || '—'} · quantidade ${fmtQtd(s.quantidade)}${temAlteracoes(s) ? ' · com registro de alterações' : ''}` }; })
         });
       }
+      // Minimizar / expandir cada data, sem afetar as demais (o estado vale durante a sessão)
+      p.querySelectorAll('[data-alternar-grupo]').forEach(b => b.onclick = () => {
+        const dt = b.dataset.alternarGrupo, fechar = !gruposRecolhidos.has(dt);
+        if (fechar) gruposRecolhidos.add(dt); else gruposRecolhidos.delete(dt);
+        p.querySelectorAll(`tr[data-grupo-de="${dt}"]`).forEach(tr => { tr.hidden = fechar; });
+        b.closest('tr').classList.toggle('recolhido', fechar);
+        b.setAttribute('aria-expanded', String(!fechar));
+        b.title = (fechar ? 'Expandir' : 'Minimizar') + ' as solicitações desta data';
+        b.textContent = fechar ? '▼ Expandir' : '▲ Minimizar';
+      });
       $('selData').onchange = () => { filtroData = $('selData').value; PAINEIS.solicitacoes(p); };
       $('btnHoje').onclick = () => { filtroData = hoje; PAINEIS.solicitacoes(p); };
 
