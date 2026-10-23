@@ -55,7 +55,7 @@
   } = fbAuth;
   const {
     getFirestore, collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc,
-    query, where, serverTimestamp, writeBatch, increment
+    query, where, serverTimestamp, writeBatch, increment, onSnapshot
   } = fbStore;
 
   const firebaseApp = initializeApp(cfg);
@@ -250,6 +250,7 @@
   }
 
   async function sair(mensagem) {
+    pararSaldo();
     mensagemLogin = mensagem || '';
     dados = vazio();
     mesCalendario = null;   // o calendário volta ao mês atual no próximo acesso
@@ -1389,7 +1390,66 @@
   /* ================= Paioleiro ================= */
   // Vê apenas solicitações autorizadas ("Pedido Recebido") e as já fornecidas,
   // e só pode marcar "Fornecido" (com baixa no estoque).
+  /* ---------- Saldo em Estoque (Paioleiro): somente consulta ---------- */
+  // Lê os próprios cadastros de itens no Firebase (coleção "itens"): o campo "saldo"
+  // já reflete o estoque inicial, as entradas e as baixas feitas em cada fornecimento.
+  // A tela acompanha as alterações em tempo real e não grava nada.
+  let pararSaldoFn = null;
+  function pararSaldo() { if (pararSaldoFn) { try { pararSaldoFn(); } catch (e) { /* já encerrado */ } pararSaldoFn = null; } }
+  function painelSaldo(alvo) {
+    pararSaldo();
+    const filtro = { texto: '', unidade: '', situacao: '' };
+    let itens = null, falha = '';
+    const norm = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const desenharLinhas = () => {
+      const corpo = $('saldoCorpo'); if (!corpo) return;
+      if (falha) { $('saldoInfo').innerHTML = `<span class="erro">${esc(falha)}</span>`; corpo.innerHTML = ''; return; }
+      if (!itens) { $('saldoInfo').textContent = 'Carregando saldos…'; return; }
+      const sel = $('saldoUnidade'), unidades = [...new Set(itens.map(i => i.unidade).filter(Boolean))].sort(ordemNatural);
+      const atualU = filtro.unidade && unidades.includes(filtro.unidade) ? filtro.unidade : '';
+      sel.innerHTML = '<option value="">Todas</option>' + unidades.map(u => `<option value="${esc(u)}" ${u === atualU ? 'selected' : ''}>${esc(u)}</option>`).join('');
+      filtro.unidade = atualU;
+      const q = norm(filtro.texto);
+      const vis = itens.filter(i => (!q || norm(i.nome).includes(q))
+        && (!filtro.unidade || i.unidade === filtro.unidade)
+        && (!filtro.situacao || (filtro.situacao === 'com' ? i.saldo > EPS : !(i.saldo > EPS))));
+      const semSaldo = itens.filter(i => !(i.saldo > EPS)).length;
+      $('saldoInfo').textContent = `${plural(vis.length, 'item', 'itens')}${vis.length !== itens.length ? ` de ${itens.length}` : ''} · ${plural(semSaldo, 'sem saldo', 'sem saldo')}`;
+      corpo.innerHTML = vis.length ? vis.map(i => {
+        const zero = !(i.saldo > EPS);
+        return `<tr><td><strong>${esc(i.nome)}</strong>${i.ativo === false ? ' <span class="status inativo">Inativo</span>' : ''}</td>
+          <td>${esc(i.unidade || '—')}</td>
+          <td class="num">${zero ? `<span class="saldo-zero">${fmtQtd(i.saldo)}</span> <span class="status sem-saldo">Sem saldo</span>` : `<strong>${fmtQtd(i.saldo)}</strong>`}</td></tr>`;
+      }).join('') : '<tr><td colspan="3" class="muted">Nenhum item encontrado com esses filtros.</td></tr>';
+    };
+    alvo.innerHTML = `
+      <section class="card">
+        <h2 class="titulo-saldo">📦 Saldo em Estoque <span class="ao-vivo" id="saldoAoVivo">Atualizado em tempo real</span></h2>
+        <p class="muted small" style="margin-top:-.3rem">Somente consulta. Mostra o saldo cadastrado de cada item, já considerando o estoque inicial, as entradas e as baixas feitas ao confirmar cada fornecimento.</p>
+        <div class="saldo-filtros">
+          <label>Pesquisar item<input id="saldoBusca" type="search" placeholder="Digite o nome do item…" autocomplete="off"></label>
+          <label>Unidade<select id="saldoUnidade"><option value="">Todas</option></select></label>
+          <label>Situação<select id="saldoSituacao"><option value="">Todos os itens</option><option value="com">Com saldo</option><option value="sem">Sem saldo</option></select></label>
+        </div>
+        <p class="small muted" id="saldoInfo" style="margin:.2rem 0 .6rem">Carregando saldos…</p>
+        <div class="tabela-wrap"><table class="tabela-saldo">
+          <thead><tr><th>Item</th><th>Unidade</th><th class="num">Saldo cadastrado</th></tr></thead>
+          <tbody id="saldoCorpo"></tbody></table></div>
+      </section>`;
+    $('saldoBusca').oninput = () => { filtro.texto = $('saldoBusca').value; desenharLinhas(); };
+    $('saldoUnidade').onchange = () => { filtro.unidade = $('saldoUnidade').value; desenharLinhas(); };
+    $('saldoSituacao').onchange = () => { filtro.situacao = $('saldoSituacao').value; desenharLinhas(); };
+    const receber = docs => { itens = docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => ordemNatural(a.nome, b.nome)); falha = ''; desenharLinhas(); };
+    if (typeof onSnapshot === 'function') {
+      pararSaldoFn = onSnapshot(collection(db, 'itens'), snap => receber(snap.docs),
+        e => { falha = 'Não foi possível acompanhar os saldos: ' + msgErro(e); const v = $('saldoAoVivo'); if (v) v.hidden = true; desenharLinhas(); });
+    } else {
+      getDocs(collection(db, 'itens')).then(snap => receber(snap.docs)).catch(e => { falha = 'Não foi possível carregar os saldos: ' + msgErro(e); desenharLinhas(); });
+    }
+  }
+
   async function telaPaioleiro(mensagem) {
+    pararSaldo();
     app.innerHTML = CARREGANDO;
     try {
       const [modalidades, eventos, solicitacoes, itens, vales] = await Promise.all([
@@ -1404,8 +1464,9 @@
     app.innerHTML = cabecalho('Paioleiro', true) + `
       <main class="conteudo">
         ${mensagem ? `<div class="aviso">${esc(mensagem)}</div>` : ''}
-        <div class="acoes" style="margin:0 0 1rem"><button class="btn primario" id="btnAbrirVale">📄 Gerar Vale de Gêneros</button></div>
+        <div class="acoes" style="margin:0 0 1rem"><button class="btn primario" id="btnAbrirVale">📄 Gerar Vale de Gêneros</button><button class="btn primario" id="btnAbrirSaldo">📦 Saldo em Estoque</button></div>
         <div id="areaVale" hidden></div>
+        <div id="areaSaldo" hidden></div>
         <div id="painel"></div>
       </main>`;
     ligarSair();
@@ -1414,6 +1475,12 @@
       const area = $('areaVale'); area.hidden = !area.hidden;
       $('btnAbrirVale').textContent = area.hidden ? '📄 Gerar Vale de Gêneros' : 'Fechar Vale de Gêneros';
       if (!area.hidden) painelVales(area, { recarregar: msg => telaPaioleiro(msg) });
+    };
+    $('btnAbrirSaldo').onclick = () => {
+      const area = $('areaSaldo'); area.hidden = !area.hidden;
+      $('btnAbrirSaldo').textContent = area.hidden ? '📦 Saldo em Estoque' : 'Fechar Saldo em Estoque';
+      $('btnAbrirSaldo').classList.toggle('ativa-menu', !area.hidden);
+      if (area.hidden) { pararSaldo(); area.innerHTML = ''; } else painelSaldo(area);
     };
     PAINEIS.solicitacoes($('painel'));
   }
