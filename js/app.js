@@ -67,7 +67,8 @@
   let mensagemLogin = '';
   let dados = vazio();
   let filtroSolicitacoes = 'todas';
-  let filtroData = 'todas';   // data da retirada selecionada no painel de solicitações
+  let filtroData = 'todas';
+  const filtroHistorico = { tipo: '', de: '', ate: '', admin: '' }; // filtros do Histórico de Exclusões   // data da retirada selecionada no painel de solicitações
   // Quem está usando o painel de solicitações (Administrador ou Paioleiro).
   const CTX_ADMIN = { papel: 'admin', recarregar: msg => telaAdmin('solicitacoes', msg, true) };
   const CTX_PAIOLEIRO = { papel: 'paioleiro', recarregar: msg => telaPaioleiro(msg) };
@@ -76,7 +77,7 @@
   let ctxSol = CTX_ADMIN;
 
   function vazio() {
-    return { modalidades: [], eventos: [], usuarios: [], solicitacoes: [], itens: [], movimentos: [], exclusoes: [] };
+    return { modalidades: [], eventos: [], usuarios: [], solicitacoes: [], itens: [], movimentos: [], exclusoes: [], auditoria: [] };
   }
 
   /* ---------- Utilitários ---------- */
@@ -166,8 +167,14 @@
   };
 
   const modalidade = id => dados.modalidades.find(m => m.id === id);
+  // Nome do setor para exibição ("setor" na tela = coleção "modalidades" no banco).
+  // Se o setor foi excluído, usa o nome guardado no Histórico de Exclusões.
+  const nomeSetor = id => modalidade(id)?.nome
+    ?? (dados.exclusoes || []).find(x => x.tipo === 'setor' && x.refId === id)?.nome
+    ?? '—';
   const evento = id => dados.eventos.find(e => e.id === id);
   const item = id => dados.itens.find(i => i.id === id);
+  const unidadeDoItem = id => item(id)?.unidade ?? (dados.exclusoes || []).find(x => x.tipo === 'item' && x.refId === id)?.unidade ?? '';
   // Fluxo: pendente -> recebido ("Pedido Recebido") -> fornecido ("Fornecido" + baixa no estoque).
   // "atendido" existe apenas em solicitações antigas (anteriores a este fluxo).
   const statusDe = s => ['recebido', 'fornecido', 'atendido'].includes(s.status) ? s.status : 'pendente';
@@ -250,7 +257,7 @@
       if (perfil.perfil === 'admin') { filtroSolicitacoes = 'todas'; ctxSol = CTX_ADMIN; return telaAdmin('solicitacoes', '', true); }
       if (ehPerfilPaioleiro(perfil)) { filtroSolicitacoes = 'recebidos'; ctxSol = CTX_PAIOLEIRO; return telaPaioleiro(); }
       if (perfil.perfil === 'responsavel' && perfil.modalidadeId) return telaResponsavel();
-      return sair('Usuário sem modalidade vinculada. Procure o Administrador.');
+      return sair('Usuário sem setor vinculado. Procure o Administrador.');
     } catch (e) {
       return sair(msgErro(e));
     }
@@ -321,7 +328,7 @@
         lista('itens'),
         listaConsulta(query(collection(db, 'solicitacoes'), where('modalidadeId', '==', perfil.modalidadeId)))
       ]);
-      if (!mSnap.exists()) return sair('A modalidade vinculada ao seu acesso não foi encontrada. Procure o Administrador.');
+      if (!mSnap.exists()) return sair('O setor vinculado ao seu acesso não foi encontrado. Procure o Administrador.');
       mod = { id: mSnap.id, ...mSnap.data() };
       dados = { ...vazio(), modalidades: [mod], eventos, itens, solicitacoes };
     } catch (e) {
@@ -335,7 +342,7 @@
       <section class="card" id="secCalendario"></section>
       <section class="card" id="secSolicitacao" hidden></section>
       <section class="card">
-        <h2>Solicitações da modalidade</h2>
+        <h2>Solicitações do setor</h2>
         ${minhas.length ? `<div class="tabela-wrap"><table>
           <thead><tr><th>Data da retirada</th><th>Retirada</th><th class="num">Quantidade</th><th>Itens</th><th>Status</th><th>Registrada em</th></tr></thead>
           <tbody>${minhas.map(s => `<tr class="${classeLinha(s)}">
@@ -356,12 +363,12 @@
 
   function msgLimiteModalidade(m) {
     return m.limite == null
-      ? 'O limite de pedidos desta modalidade ainda não foi definido pelo Administrador.'
-      : `Quantidade máxima permitida para esta modalidade: ${pedidos(m.limite)}.`;
+      ? 'O limite de pedidos deste setor ainda não foi definido pelo Administrador.'
+      : `Quantidade máxima permitida para este setor: ${pedidos(m.limite)}.`;
   }
   const msgPrazoEncerrado = dt => `O prazo para solicitar para ${fmtData(dt)} encerrou às ${PRAZO_TEXTO} (horário de Brasília). Não é mais possível solicitar para esta data.`;
   const MSG_DATA_PASSADA = 'Não é possível solicitar para datas anteriores a hoje.';
-  const MSG_DUPLICADA = 'Já existe uma solicitação da sua modalidade para esta data. É permitida apenas uma solicitação por data.';
+  const MSG_DUPLICADA = 'Já existe uma solicitação do seu setor para esta data. É permitida apenas uma solicitação por data.';
 
   // ---------- Calendário ----------
   function desenharCalendario(mod, aviso) {
@@ -451,7 +458,7 @@
     sec.innerHTML = `
       <h2>Solicitação de pedidos</h2>
       <form id="fSol" novalidate>
-        <label>Modalidade<input value="${esc(mod.nome)}" readonly></label>
+        <label>Setor<input value="${esc(mod.nome)}" readonly></label>
         <label>Data da retirada<input id="inpData" value="${esc(fmtDataSemana(valores.data))}" readonly></label>
         <div class="retirada-fixa">
           <span class="rotulo">Horário de retirada</span>
@@ -463,7 +470,7 @@
           <input type="number" id="inpQtd" min="1" step="1" inputmode="numeric" value="${editavel(valores.quantidade)}">
         </label>
         <p class="muted small" style="margin-top:-.5rem">
-          ${mod.limite != null ? `Limite da modalidade: ${pedidos(mod.limite)}.` : 'Limite da modalidade ainda não definido pelo Administrador.'}
+          ${mod.limite != null ? `Limite do setor: ${pedidos(mod.limite)}.` : 'Limite do setor ainda não definido pelo Administrador.'}
         </p>
 
         <h3 style="font-size:1rem;margin-top:1rem">Itens do pedido</h3>
@@ -512,7 +519,7 @@
       <h2>Resumo da solicitação</h2>
       <p class="muted">Confira os dados antes de confirmar.</p>
       <dl class="resumo">
-        <dt>Modalidade</dt><dd>${esc(mod.nome)}</dd>
+        <dt>Setor</dt><dd>${esc(mod.nome)}</dd>
         <dt>Data da retirada</dt><dd>${esc(fmtDataSemana(d.data))}</dd>
         <dt>Horário de retirada</dt><dd>${RETIRADA_TEXTO}</dd>
         <dt>Quantidade</dt><dd>${fmtQtd(d.quantidade)}</dd>
@@ -578,14 +585,16 @@
   const ABAS = [
     ['solicitacoes', 'Solicitações'],
     ['itens', 'Itens e estoque'],
-    ['modalidades', 'Modalidades e limites'],
+    ['modalidades', 'Setores e limites'],
     ['responsaveis', 'Responsáveis'],
     ['paioleiros', 'Paioleiros']
   ];
 
-  async function garantirModalidades() {
+  async function garantirModalidades(exclusoes = []) {
     const atuais = await lista('modalidades');
     if (atuais.length) return ordenarModalidades(atuais);
+    // Não recria os setores iniciais se eles foram excluídos de propósito.
+    if (exclusoes.some(x => x.tipo === 'setor')) return [];
     const b = writeBatch(db);
     MODALIDADES_INICIAIS.forEach((nome, i) =>
       b.set(doc(db, 'modalidades', 'm' + String(i + 1).padStart(2, '0')), { nome, limite: null, ordem: i + 1 }));
@@ -598,17 +607,19 @@
     if (recarregar) {
       app.innerHTML = CARREGANDO;
       try {
-        const [modalidades, eventos, usuarios, solicitacoes, itens, movimentos, exclusoes] = await Promise.all([
-          garantirModalidades(), lista('eventos').catch(() => []), lista('usuarios'), lista('solicitacoes'), lista('itens'), lista('movimentos'),
-          lista('exclusoes').catch(() => [])
+        const exclusoes = await lista('exclusoes').catch(() => []);
+        const [modalidades, eventos, usuarios, solicitacoes, itens, movimentos, auditoria] = await Promise.all([
+          garantirModalidades(exclusoes), lista('eventos').catch(() => []), lista('usuarios'), lista('solicitacoes'), lista('itens'), lista('movimentos'),
+          lista('auditoria').catch(() => [])
         ]);
-        dados = { modalidades, eventos, usuarios, solicitacoes, itens, movimentos, exclusoes };
+        dados = { modalidades, eventos, usuarios, solicitacoes, itens, movimentos, exclusoes, auditoria };
       } catch (e) {
         return telaFalha('Administrador', e, () => telaAdmin(aba, '', true));
       }
     }
     app.innerHTML = cabecalho('Administrador', true) + `
-      <nav class="abas">${ABAS.map(([k, t]) => `<button data-aba="${k}" class="${k === aba ? 'ativa' : ''}">${t}</button>`).join('')}</nav>
+      <nav class="abas">${ABAS.map(([k, t]) => `<button data-aba="${k}" class="${k === aba ? 'ativa' : ''}">${t}</button>`).join('')}
+        <button data-aba="historico" class="aba-icone ${aba === 'historico' ? 'ativa' : ''}" title="Histórico de Exclusões" aria-label="Histórico de Exclusões">🗂 Histórico de Exclusões</button></nav>
       <main class="conteudo">
         ${mensagem ? `<div class="aviso">${esc(mensagem)}</div>` : ''}
         <div id="painel"></div>
@@ -634,74 +645,236 @@
     }
   }
 
-  /* ================= Exclusão de usuários (somente Administrador) ================= */
-  // Exclui o cadastro do usuário (coleção "usuarios") e registra a exclusão em "exclusoes",
-  // na mesma gravação. Sem o cadastro, o Firebase bloqueia todo o acesso aos dados
-  // (regras do Firestore) e o sistema não permite entrar. Solicitações, fornecimentos,
-  // registros de alteração e movimentações NÃO são apagados e mantêm o nome do usuário.
-  // O login no Firebase Authentication é removido pelo Administrador no Console
-  // (no plano gratuito, o navegador não pode apagar o login de outra pessoa).
+  /* ================= Exclusões (somente Administrador) ================= */
+  // Toda exclusão é gravada no Firebase e registrada na coleção "exclusoes"
+  // (Histórico de Exclusões), que guarda o nome e a identificação do que foi excluído.
+  // Solicitações, fornecimentos, registros de alteração e movimentações NÃO são apagados
+  // por essas operações e continuam identificando os usuários pelo nome.
+  // Usuários: o cadastro é excluído (o que bloqueia todo o acesso) e o login no Firebase
+  // Authentication é removido pelo Administrador no Console (no plano gratuito, o
+  // navegador não pode apagar o login de outra pessoa).
+  const TIPOS_EXCLUSAO = { setor: 'Setor', responsavel: 'Responsável', paioleiro: 'Paioleiro', item: 'Item', historico: 'Histórico' };
   const nomePerfil = u => u.perfil === 'responsavel' ? 'Responsável' : ehPerfilPaioleiro(u) ? 'Paioleiro' : 'Administrador';
-  const botaoExcluir = u => `<button class="btn perigo pequeno" data-excluir="${u.id}">Excluir</button>`;
+  const tipoDoUsuario = u => u.perfil === 'responsavel' ? 'responsavel' : 'paioleiro';
+  const botaoExcluir = (id, attr = 'data-excluir') => `<button class="btn perigo pequeno" ${attr}="${id}">Excluir</button>`;
+  const AVISO_IRREVERSIVEL = 'Esta exclusão é definitiva. O plano gratuito do Firebase não possui backup: os registros apagados não poderão ser recuperados.';
 
-  function ligarExclusao(p, aba) {
-    p.querySelectorAll('[data-excluir]').forEach(b => b.onclick = () => {
-      const u = dados.usuarios.find(x => x.id === b.dataset.excluir);
-      if (!u) return;
-      $('secExcluir')?.remove();
-      const bloqueio = u.id === perfil.uid ? 'Você não pode excluir a própria conta.'
-        : u.perfil === 'admin' ? 'Contas de Administrador não podem ser excluídas pelo sistema.' : '';
-      p.insertAdjacentHTML('afterbegin', `
+  // Registros antigos do histórico (versão anterior) são lidos no formato novo.
+  function normalizarExclusao(x) {
+    return {
+      ...x,
+      tipo: x.tipo || (x.perfil === 'responsavel' ? 'responsavel' : 'paioleiro'),
+      identificacao: x.identificacao ?? x.email ?? '',
+      refId: x.refId ?? x.id,
+      setorId: x.setorId ?? x.modalidadeId ?? null,
+      operacao: x.operacao || 'individual',
+      resultado: x.resultado || 'concluida',
+      detalhe: x.detalhe || ''
+    };
+  }
+  const exclusoesNorm = () => (dados.exclusoes || []).map(normalizarExclusao);
+
+  function dadosRegistro(tipo, nome, identificacao, refId, operacao, resultado, detalhe, extra = {}) {
+    return {
+      tipo, nome: String(nome || '—'), identificacao: String(identificacao || ''), refId: String(refId || ''),
+      setorId: extra.setorId ?? null, unidade: extra.unidade ?? null,
+      operacao, resultado, detalhe: String(detalhe || '').slice(0, 500),
+      excluidoEm: serverTimestamp(), porUid: perfil.uid, porNome: perfil.nome
+    };
+  }
+  async function registrarFalha(tipo, nome, identificacao, refId, operacao, detalhe, extra) {
+    try { await addDoc(collection(db, 'exclusoes'), dadosRegistro(tipo, nome, identificacao, refId, operacao, 'falha', detalhe, extra)); }
+    catch (_) { /* sem permissão ou sem conexão: a falha é mostrada na tela */ }
+  }
+
+  // Painel de confirmação genérico (Cancelar / Confirmar).
+  function abrirConfirmacao(p, { titulo, corpo, bloqueio, rotuloConfirmar, aoConfirmar, extraAcoes = '' }) {
+    $('secExcluir')?.remove();
+    p.insertAdjacentHTML('afterbegin', `
       <section class="card exclusao" id="secExcluir">
-        <h2>Excluir usuário</h2>
-        <dl class="resumo">
-          <dt>Nome</dt><dd>${esc(u.nome)}</dd>
-          <dt>Login</dt><dd>${esc(u.email || '—')}</dd>
-          <dt>Perfil</dt><dd>${esc(nomePerfil(u))}</dd>
-          ${u.perfil === 'responsavel' ? `<dt>Modalidade</dt><dd>${esc(modalidade(u.modalidadeId)?.nome ?? '—')}</dd>` : ''}
-        </dl>
-        <p class="small">O cadastro será <strong>excluído</strong> e o acesso ao sistema ficará <strong>bloqueado imediatamente</strong>.
-          Solicitações, fornecimentos, registros de alteração de quantidade e movimentações de estoque <strong>não serão apagados</strong>
-          e continuarão identificando este usuário pelo nome.</p>
-        <div class="erro" id="erroExcluir">${esc(bloqueio)}</div>
+        <h2>${titulo}</h2>
+        ${corpo}
+        <div class="erro" id="erroExcluir">${esc(bloqueio || '')}</div>
         <div class="acoes">
           <button class="btn secundario" id="btnCancelarExcluir">Cancelar</button>
-          <button class="btn perigo-cheio" id="btnConfirmarExcluir" ${bloqueio ? 'disabled' : ''}>Confirmar exclusão</button>
+          ${bloqueio ? '' : `<button class="btn perigo-cheio" id="btnConfirmarExcluir">${rotuloConfirmar || 'Confirmar exclusão'}</button>`}
+          ${extraAcoes}
         </div>
       </section>`);
-      $('secExcluir').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
-      $('btnCancelarExcluir').onclick = () => $('secExcluir').remove();
-      $('btnConfirmarExcluir').onclick = () => comBotao($('btnConfirmarExcluir'), async () => {
-        try {
-          const lote = writeBatch(db);
-          lote.delete(doc(db, 'usuarios', u.id));
-          lote.set(doc(db, 'exclusoes', u.id), {
-            nome: u.nome, email: u.email || '', perfil: u.perfil, modalidadeId: u.modalidadeId || null,
-            excluidoEm: serverTimestamp(), porUid: perfil.uid, porNome: perfil.nome
-          });
-          await lote.commit();
-          salvo(aba, `Usuário ${u.nome} (${nomePerfil(u)}) excluído. O acesso ao sistema foi bloqueado. ` +
-            `Para concluir, remova o login ${u.email} em Firebase → Authentication → Usuários.`);
-        } catch (err) {
-          $('erroExcluir').textContent = 'Não foi possível excluir: ' + msgErro(err) + ' Nada foi alterado; tente novamente.';
+    $('secExcluir').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    $('btnCancelarExcluir').onclick = () => $('secExcluir').remove();
+    if (!bloqueio) $('btnConfirmarExcluir').onclick = () => comBotao($('btnConfirmarExcluir'), () => aoConfirmar(msg => { $('erroExcluir').textContent = msg; }));
+  }
+
+  // ---------- Usuários: individual e em lote ----------
+  function ligarExclusaoUsuarios(p, aba) {
+    const marcados = () => [...p.querySelectorAll('[data-sel-usuario]:checked')].map(c => c.dataset.selUsuario);
+    const barra = () => {
+      const n = marcados().length;
+      $('barraLote').hidden = n === 0;
+      $('qtdSelecionados').textContent = plural(n, 'usuário selecionado', 'usuários selecionados');
+    };
+    p.querySelectorAll('[data-sel-usuario]').forEach(c => c.onchange = barra);
+    const todos = $('selTodosUsuarios');
+    if (todos) todos.onchange = () => { p.querySelectorAll('[data-sel-usuario]').forEach(c => { c.checked = todos.checked; }); barra(); };
+    p.querySelectorAll('[data-excluir]').forEach(b => b.onclick = () => confirmarExclusaoUsuarios(p, aba, [b.dataset.excluir], 'individual'));
+    const bLote = $('btnExcluirSelecionados');
+    if (bLote) bLote.onclick = () => confirmarExclusaoUsuarios(p, aba, marcados(), 'lote');
+  }
+
+  function confirmarExclusaoUsuarios(p, aba, ids, operacao) {
+    const lista = ids.map(id => dados.usuarios.find(u => u.id === id)).filter(Boolean);
+    if (!lista.length) return;
+    const proibido = lista.find(u => u.id === perfil.uid || u.perfil === 'admin');
+    abrirConfirmacao(p, {
+      titulo: lista.length === 1 ? 'Excluir usuário' : `Excluir ${lista.length} usuários selecionados`,
+      bloqueio: proibido ? (proibido.id === perfil.uid ? 'Você não pode excluir a própria conta.' : 'Contas de Administrador não podem ser excluídas pelo sistema.') : '',
+      corpo: `
+        <p><strong>${plural(lista.length, 'usuário será excluído', 'usuários serão excluídos')}:</strong></p>
+        <div class="tabela-wrap"><table>
+          <thead><tr><th>Nome</th><th>Login</th><th>Perfil</th><th>Setor</th></tr></thead>
+          <tbody>${lista.map(u => `<tr><td><strong>${esc(u.nome)}</strong></td><td>${esc(u.email || '—')}</td><td>${esc(nomePerfil(u))}</td>
+            <td>${u.perfil === 'responsavel' ? esc(nomeSetor(u.modalidadeId)) : '—'}</td></tr>`).join('')}</tbody></table></div>
+        <p class="small">O cadastro de cada usuário será <strong>excluído</strong> e o acesso ao sistema ficará <strong>bloqueado imediatamente</strong>.
+          Solicitações, fornecimentos, registros de alteração de quantidade e movimentações de estoque <strong>não serão apagados</strong>
+          e continuarão identificando os usuários pelo nome. Depois, remova os logins em Firebase → Authentication → Usuários.</p>`,
+      rotuloConfirmar: lista.length === 1 ? 'Confirmar exclusão' : `Confirmar exclusão de ${lista.length} usuários`,
+      aoConfirmar: async erro => {
+        const ok = [], falhas = [];
+        for (const u of lista) {
+          try {
+            const lote = writeBatch(db);
+            lote.delete(doc(db, 'usuarios', u.id));
+            lote.set(doc(db, 'exclusoes', u.id), dadosRegistro(tipoDoUsuario(u), u.nome, u.email, u.id, operacao, 'concluida', '', { setorId: u.modalidadeId || null }));
+            await lote.commit();
+            ok.push(u);
+          } catch (err) {
+            falhas.push({ u, msg: msgErro(err) });
+            await registrarFalha(tipoDoUsuario(u), u.nome, u.email, u.id, operacao, msgErro(err), { setorId: u.modalidadeId || null });
+          }
         }
-      });
+        if (!ok.length) return erro('Nenhum usuário foi excluído.\n' + falhas.map(f => `• ${f.u.nome}: ${f.msg}`).join('\n'));
+        const msg = [
+          `Concluído: ${ok.map(u => `${u.nome} (${nomePerfil(u)})`).join(', ')}. O acesso ao sistema foi bloqueado.`,
+          falhas.length ? `FALHOU: ${falhas.map(f => `${f.u.nome} (${f.msg})`).join(', ')}.` : '',
+          `Para concluir, remova no Firebase → Authentication → Usuários: ${ok.map(u => u.email).join(', ')}.`
+        ].filter(Boolean).join(' ');
+        salvo(aba, msg);
+      }
     });
   }
 
-  function historicoExclusoesHtml(filtro) {
-    const l = (dados.exclusoes || []).filter(filtro).sort((a, b) => ms(b.excluidoEm) - ms(a.excluidoEm));
-    if (!l.length) return '';
-    return `<section class="card">
-      <h2>Usuários excluídos</h2>
-      <p class="muted small" style="margin-top:-.3rem">Histórico para auditoria. Se ainda não fez, remova o login de cada um em Firebase → Authentication → Usuários.</p>
-      <div class="tabela-wrap"><table>
-        <thead><tr><th>Nome</th><th>Login</th><th>Perfil</th><th>Excluído em</th><th>Por</th></tr></thead>
-        <tbody>${l.map(x => `<tr class="linha-inativa">
-          <td>${esc(x.nome)}</td><td>${esc(x.email)}</td><td>${esc(nomePerfil(x))}${x.modalidadeId ? ' · ' + esc(modalidade(x.modalidadeId)?.nome ?? '') : ''}</td>
-          <td>${fmtDataHora(x.excluidoEm)}</td><td>${esc(x.porNome || '—')}</td>
-        </tr>`).join('')}</tbody></table></div>
-    </section>`;
+  // Seleção (caixas) + barra "Excluir selecionados" para as tabelas de usuários.
+  const cabecalhoSelecao = () => '<th style="width:2.2rem"><input type="checkbox" id="selTodosUsuarios" aria-label="Selecionar todos" class="caixa"></th>';
+  const caixaUsuario = u => `<td><input type="checkbox" class="caixa" data-sel-usuario="${u.id}" aria-label="Selecionar ${esc(u.nome)}"></td>`;
+  const barraLote = () => `<div class="barra-lote" id="barraLote" hidden>
+      <span id="qtdSelecionados"></span>
+      <button class="btn perigo-cheio pequeno" id="btnExcluirSelecionados">Excluir selecionados</button>
+    </div>`;
+
+  // ---------- Setores ----------
+  function confirmarExclusaoSetor(p, m) {
+    const responsaveis = dados.usuarios.filter(u => u.modalidadeId === m.id);
+    const sols = dados.solicitacoes.filter(s => s.modalidadeId === m.id);
+    const ativas = sols.filter(s => ['pendente', 'recebido'].includes(statusDe(s)));
+    const concluidas = sols.length - ativas.length;
+    const impedimentos = [
+      responsaveis.length ? `Responsável vinculado: ${responsaveis.map(u => u.nome).join(', ')} — exclua o responsável ou transfira-o para outro setor.` : '',
+      ativas.length ? `${plural(ativas.length, 'solicitação em andamento', 'solicitações em andamento')} (Pendente ou Pedido Recebido) — conclua ou aguarde o fornecimento antes de excluir.` : ''
+    ].filter(Boolean);
+    abrirConfirmacao(p, {
+      titulo: 'Excluir setor',
+      bloqueio: impedimentos.length ? 'Não é possível excluir este setor agora:\n' + impedimentos.map(t => '• ' + t).join('\n') : '',
+      corpo: `
+        <dl class="resumo"><dt>Setor</dt><dd>${esc(m.nome)}</dd><dt>Limite</dt><dd>${m.limite != null ? pedidos(m.limite) : 'não definido'}</dd>
+          <dt>Responsáveis</dt><dd>${responsaveis.length}</dd><dt>Solicitações</dt><dd>${sols.length} (${ativas.length} em andamento, ${concluidas} concluídas)</dd></dl>
+        ${!impedimentos.length && concluidas ? `<p class="small">As ${plural(concluidas, 'solicitação concluída', 'solicitações concluídas')} deste setor <strong>permanecerão no histórico</strong>, identificadas pelo nome do setor.</p>` : ''}`,
+      aoConfirmar: async erro => {
+        try {
+          const lote = writeBatch(db);
+          lote.delete(doc(db, 'modalidades', m.id));
+          lote.set(doc(collection(db, 'exclusoes')), dadosRegistro('setor', m.nome, m.id, m.id, 'individual', 'concluida', concluidas ? `${concluidas} solicitações concluídas preservadas` : ''));
+          await lote.commit();
+          salvo('modalidades', `Setor ${m.nome} excluído.`);
+        } catch (err) {
+          await registrarFalha('setor', m.nome, m.id, m.id, 'individual', msgErro(err));
+          erro('Não foi possível excluir o setor: ' + msgErro(err) + ' Nada foi alterado.');
+        }
+      }
+    });
+  }
+
+  // ---------- Itens ----------
+  function confirmarExclusaoItem(p, i) {
+    const ativas = dados.solicitacoes.filter(s => ['pendente', 'recebido'].includes(statusDe(s)) && s.itens && s.itens[i.id]);
+    const movs = dados.movimentos.filter(m => m.itemId === i.id).length;
+    const saidas = dados.solicitacoes.filter(s => estoqueBaixado(s) && s.itens && s.itens[i.id]).length;
+    const impedimentos = [
+      i.saldo > 0 ? `O item possui saldo em estoque (${qtdUn(i.saldo, i.unidade)}).` : '',
+      ativas.length ? `O item está em ${plural(ativas.length, 'solicitação em andamento', 'solicitações em andamento')} (Pendente ou Pedido Recebido).` : ''
+    ].filter(Boolean);
+    abrirConfirmacao(p, {
+      titulo: 'Excluir item',
+      bloqueio: impedimentos.length ? 'Não é possível excluir este item com segurança:\n' + impedimentos.map(t => '• ' + t).join('\n') +
+        (i.ativo ? '\nComo alternativa, você pode desativá-lo: ele deixa de aparecer para os responsáveis e o histórico é mantido.' : '') : '',
+      extraAcoes: impedimentos.length && i.ativo ? '<button class="btn primario" id="btnDesativarAlternativa">Desativar item</button>' : '',
+      corpo: `
+        <dl class="resumo"><dt>Item</dt><dd>${esc(i.nome)}</dd><dt>Saldo</dt><dd>${esc(qtdUn(i.saldo, i.unidade))}</dd>
+          <dt>Movimentações</dt><dd>${movs} entradas/estoque inicial · ${saidas} fornecimentos</dd></dl>
+        ${!impedimentos.length && (movs || saidas) ? '<p class="small">As movimentações, os fornecimentos e as solicitações anteriores <strong>não serão apagados</strong> e continuarão identificando o item pelo nome.</p>' : ''}`,
+      aoConfirmar: async erro => {
+        try {
+          const lote = writeBatch(db);
+          lote.delete(doc(db, 'itens', i.id));
+          lote.set(doc(collection(db, 'exclusoes')), dadosRegistro('item', i.nome, i.unidade, i.id, 'individual', 'concluida', `${movs + saidas} movimentações preservadas`, { unidade: i.unidade }));
+          await lote.commit();
+          salvo('itens', `Item ${i.nome} excluído.`);
+        } catch (err) {
+          await registrarFalha('item', i.nome, i.unidade, i.id, 'individual', msgErro(err), { unidade: i.unidade });
+          erro('Não foi possível excluir o item: ' + msgErro(err) + ' Nada foi alterado.');
+        }
+      }
+    });
+    const alt = $('btnDesativarAlternativa');
+    if (alt) alt.onclick = () => comBotao(alt, async () => {
+      try { await updateDoc(doc(db, 'itens', i.id), { ativo: false }); salvo('itens', `Item ${i.nome} desativado. O histórico foi mantido.`); }
+      catch (err) { $('erroExcluir').textContent = msgErro(err); }
+    });
+  }
+
+  // ---------- Exclusão de históricos ----------
+  // registros: [{ id, descricao }]. Apaga em lotes e grava um registro administrativo
+  // separado (coleção "auditoria") para cada lote, que não pode ser apagado.
+  function confirmarExclusaoHistorico(p, { colecao, nomeHistorico, registros, aba }) {
+    if (!registros.length) return;
+    abrirConfirmacao(p, {
+      titulo: `Excluir histórico — ${nomeHistorico}`,
+      corpo: `
+        <p><strong>${plural(registros.length, 'registro será apagado', 'registros serão apagados')} definitivamente:</strong></p>
+        <ul class="lista-exclusao">${registros.slice(0, 50).map(r => `<li>${esc(r.descricao)}</li>`).join('')}${registros.length > 50 ? `<li>… e mais ${registros.length - 50}</li>` : ''}</ul>
+        <div class="aviso-perigo">⚠ ${AVISO_IRREVERSIVEL}</div>
+        <p class="small">A ação ficará registrada no "Registro administrativo de exclusões de histórico".</p>`,
+      rotuloConfirmar: `Apagar ${plural(registros.length, 'registro', 'registros')}`,
+      aoConfirmar: async erro => {
+        let apagados = 0; const falhas = [];
+        for (let k = 0; k < registros.length; k += 400) {
+          const parte = registros.slice(k, k + 400);
+          try {
+            const lote = writeBatch(db);
+            parte.forEach(r => lote.delete(doc(db, colecao, r.id)));
+            lote.set(doc(collection(db, 'auditoria')), {
+              acao: 'exclusao_historico', colecao, nomeHistorico, quantidade: parte.length,
+              descricao: parte.map(r => r.descricao).join(' | ').slice(0, 1500),
+              em: serverTimestamp(), porUid: perfil.uid, porNome: perfil.nome
+            });
+            await lote.commit();
+            apagados += parte.length;
+          } catch (err) { falhas.push(`${parte.length} registros: ${msgErro(err)}`); }
+        }
+        if (!apagados) return erro('Nenhum registro foi apagado.\n' + falhas.join('\n'));
+        salvo(aba, `${plural(apagados, 'registro apagado', 'registros apagados')} de "${nomeHistorico}".` + (falhas.length ? ` FALHOU: ${falhas.join('; ')}.` : ''));
+      }
+    });
   }
 
   /* ================= Paioleiro ================= */
@@ -810,8 +983,10 @@
             `<button data-filtro="${k}" class="${filtroSolicitacoes === k ? 'ativo' : ''}">${t}</button>`).join('')}
         </div>
         <div class="erro" id="erroAtend"></div>
+        ${paioleiro ? '' : `<div class="barra-lote" id="barraSol" hidden><span id="qtdSol"></span>
+          <button class="btn perigo-cheio pequeno" id="btnExcluirSol">Excluir histórico</button></div>`}
         ${porData.length ? `<div class="tabela-wrap"><table>
-          <thead><tr><th>Modalidade</th><th class="num">Quantidade</th><th>Itens</th><th>Responsável</th><th>Registrada em</th><th>Status</th></tr></thead>
+          <thead><tr><th>Setor</th><th class="num">Quantidade</th><th>Itens</th><th>Responsável</th><th>Registrada em</th><th>Status</th></tr></thead>
           <tbody>${porData.map(({ dt, lista }) => `
             <tr class="grupo-data"><td colspan="6">
               <div class="grupo-titulo">📅 ${esc(fmtDataSemana(dt))}${dt === hoje ? ' <span class="status recebido">hoje</span>' : ''}
@@ -819,7 +994,7 @@
               <div class="grupo-itens">Itens a preparar: ${itensAPreparar(lista)}</div>
             </td></tr>
             ${lista.map(s => `<tr class="${classeLinha(s)}">
-              <td><strong>${esc(modalidade(s.modalidadeId)?.nome ?? '—')}</strong></td>
+              <td>${!paioleiro && grupoDe(s) === 'fornecidos' ? `<input type="checkbox" class="caixa" data-sel-sol="${s.id}" aria-label="Selecionar para excluir do histórico" style="margin-right:.35rem">` : ''}<strong>${esc(nomeSetor(s.modalidadeId))}</strong></td>
               <td class="num">${fmtQtd(s.quantidade)}</td>
               <td>${listaItensHtml(s)}</td>
               <td>${esc(s.usuarioNome || '—')}</td>
@@ -833,11 +1008,22 @@
 
       const erro = msg => { $('erroAtend').textContent = msg; };
       const resumoTexto = s =>
-        `Modalidade: ${modalidade(s.modalidadeId)?.nome ?? '—'}\n` +
+        `Setor: ${nomeSetor(s.modalidadeId)}\n` +
         `Data da retirada: ${fmtDataSemana(dataDe(s))}\n` +
         `Retirada: ${textoRetirada(s)}\n` +
         `Quantidade: ${fmtQtd(s.quantidade)}`;
 
+      if (!paioleiro) {
+        const solMarcadas = () => [...p.querySelectorAll('[data-sel-sol]:checked')].map(c => c.dataset.selSol);
+        p.querySelectorAll('[data-sel-sol]').forEach(c => c.onchange = () => {
+          const n = solMarcadas().length; $('barraSol').hidden = !n; $('qtdSol').textContent = plural(n, 'solicitação concluída selecionada', 'solicitações concluídas selecionadas');
+        });
+        $('btnExcluirSol').onclick = () => confirmarExclusaoHistorico(p, {
+          colecao: 'solicitacoes', nomeHistorico: 'Solicitações e fornecimentos', aba: 'solicitacoes',
+          registros: solMarcadas().map(id => { const s = dados.solicitacoes.find(x => x.id === id);
+            return { id, descricao: `${fmtData(dataDe(s))} · ${nomeSetor(s.modalidadeId)} · ${s.usuarioNome || '—'} · quantidade ${fmtQtd(s.quantidade)}${temAlteracoes(s) ? ' · com registro de alterações' : ''}` }; })
+        });
+      }
       $('selData').onchange = () => { filtroData = $('selData').value; PAINEIS.solicitacoes(p); };
       $('btnHoje').onclick = () => { filtroData = hoje; PAINEIS.solicitacoes(p); };
 
@@ -878,7 +1064,7 @@
         <section class="card fornecimento" id="secFornec">
           <h2>Fornecimento</h2>
           <dl class="resumo">
-            <dt>Modalidade</dt><dd>${esc(modalidade(s.modalidadeId)?.nome ?? '—')}</dd>
+            <dt>Setor</dt><dd>${esc(nomeSetor(s.modalidadeId))}</dd>
             <dt>Data da retirada</dt><dd>${esc(fmtDataSemana(dataDe(s)))}</dd>
             <dt>Retirada</dt><dd>${esc(textoRetirada(s))}</dd>
             <dt>Responsável</dt><dd>${esc(s.usuarioNome || '—')}</dd>
@@ -1008,6 +1194,79 @@
       }
     },
 
+    /* ---- Histórico de Exclusões (aberto pelo ícone) ---- */
+    historico(p) {
+      const f = filtroHistorico;
+      const todos = exclusoesNorm().sort((a, b) => ms(b.excluidoEm) - ms(a.excluidoEm));
+      const admins = [...new Set(todos.map(x => x.porNome).filter(Boolean))].sort();
+      const diaDe = ts => { if (!ts || !ts.toMillis) return ''; const b = new Date(ts.toMillis() - FUSO_BRASILIA_MS); return isoData(b.getUTCFullYear(), b.getUTCMonth() + 1, b.getUTCDate()); };
+      const vis = todos.filter(x => (!f.tipo || x.tipo === f.tipo) && (!f.admin || x.porNome === f.admin)
+        && (!f.de || diaDe(x.excluidoEm) >= f.de) && (!f.ate || diaDe(x.excluidoEm) <= f.ate));
+      const aud = (dados.auditoria || []).slice().sort((a, b) => ms(b.em) - ms(a.em));
+
+      p.innerHTML = `
+      <section class="card">
+        <h2>🗂 Histórico de Exclusões</h2>
+        <p class="muted small" style="margin-top:-.3rem">Registros de setores, usuários, itens e históricos excluídos. Ficam guardados no Firebase mesmo depois que o cadastro original deixa de existir.</p>
+        <div class="grade filtros-hist">
+          <label>Tipo de registro
+            <select id="fhTipo"><option value="">Todos</option>
+              ${Object.entries(TIPOS_EXCLUSAO).map(([k, t]) => `<option value="${k}" ${f.tipo === k ? 'selected' : ''}>${t}</option>`).join('')}
+            </select></label>
+          <label>De<input type="date" id="fhDe" value="${esc(f.de)}"></label>
+          <label>Até<input type="date" id="fhAte" value="${esc(f.ate)}"></label>
+          <label>Administrador
+            <select id="fhAdmin"><option value="">Todos</option>
+              ${admins.map(a => `<option ${f.admin === a ? 'selected' : ''}>${esc(a)}</option>`).join('')}
+            </select></label>
+        </div>
+        <div class="acoes" style="margin:-.3rem 0 .8rem"><button class="btn secundario pequeno" id="fhLimpar">Limpar filtros</button></div>
+        <div class="erro" id="erroHist"></div>
+        ${vis.length ? `<div class="tabela-wrap"><table>
+          <thead><tr><th style="width:2.2rem"><input type="checkbox" class="caixa" id="fhTodos" aria-label="Selecionar todos"></th>
+            <th>Tipo</th><th>Nome e identificação</th><th>Data e horário</th><th>Administrador</th><th>Operação</th><th>Resultado</th></tr></thead>
+          <tbody>${vis.map(x => `<tr class="${x.resultado === 'falha' ? 'linha-falha' : ''}">
+            <td><input type="checkbox" class="caixa" data-sel-hist="${x.id}" aria-label="Selecionar registro"></td>
+            <td><span class="status ativo">${TIPOS_EXCLUSAO[x.tipo] || esc(x.tipo)}</span></td>
+            <td><strong>${esc(x.nome)}</strong>${x.identificacao ? `<div class="small muted">${esc(x.identificacao)}${x.setorId && x.tipo === 'responsavel' ? ' · setor ' + esc(nomeSetor(x.setorId)) : ''}</div>` : ''}
+              ${x.detalhe ? `<div class="small muted">${esc(x.detalhe)}</div>` : ''}</td>
+            <td>${fmtDataHora(x.excluidoEm)}</td>
+            <td>${esc(x.porNome || '—')}</td>
+            <td>${x.operacao === 'lote' ? 'Em lote' : 'Individual'}</td>
+            <td>${x.resultado === 'falha' ? '<span class="status pendente">Com falha</span>' : '<span class="status atendido">Concluída</span>'}</td>
+          </tr>`).join('')}</tbody></table></div>
+          <div class="barra-lote" id="barraHist" hidden><span id="qtdHist"></span>
+            <button class="btn perigo-cheio pequeno" id="btnExcluirHist">Excluir histórico</button></div>`
+        : '<p class="muted">Nenhum registro de exclusão' + (todos.length ? ' com estes filtros' : '') + '.</p>'}
+      </section>
+      <section class="card">
+        <h2>Registro administrativo de exclusões de histórico</h2>
+        <p class="muted small" style="margin-top:-.3rem">Rastreabilidade: cada vez que um histórico é apagado, fica registrado aqui quem apagou, quando e o quê. Este registro não pode ser apagado.</p>
+        ${aud.length ? `<div class="tabela-wrap"><table>
+          <thead><tr><th>Data e horário</th><th>Administrador</th><th>Histórico</th><th class="num">Registros</th><th>Descrição</th></tr></thead>
+          <tbody>${aud.map(a => `<tr><td>${fmtDataHora(a.em)}</td><td>${esc(a.porNome || '—')}</td><td>${esc(a.nomeHistorico || a.colecao)}</td>
+            <td class="num">${a.quantidade}</td><td class="small">${esc(a.descricao)}</td></tr>`).join('')}</tbody></table></div>`
+        : '<p class="muted">Nenhum histórico foi apagado até agora.</p>'}
+      </section>`;
+
+      const refazer = () => PAINEIS.historico(p);
+      $('fhTipo').onchange = () => { f.tipo = $('fhTipo').value; refazer(); };
+      $('fhAdmin').onchange = () => { f.admin = $('fhAdmin').value; refazer(); };
+      $('fhDe').onchange = () => { f.de = $('fhDe').value; refazer(); };
+      $('fhAte').onchange = () => { f.ate = $('fhAte').value; refazer(); };
+      $('fhLimpar').onclick = () => { Object.assign(f, { tipo: '', de: '', ate: '', admin: '' }); refazer(); };
+      if (!vis.length) return;
+      const marcados = () => [...p.querySelectorAll('[data-sel-hist]:checked')].map(c => c.dataset.selHist);
+      const barra = () => { const n = marcados().length; $('barraHist').hidden = !n; $('qtdHist').textContent = plural(n, 'registro selecionado', 'registros selecionados'); };
+      p.querySelectorAll('[data-sel-hist]').forEach(c => c.onchange = barra);
+      $('fhTodos').onchange = () => { p.querySelectorAll('[data-sel-hist]').forEach(c => { c.checked = $('fhTodos').checked; }); barra(); };
+      $('btnExcluirHist').onclick = () => confirmarExclusaoHistorico(p, {
+        colecao: 'exclusoes', nomeHistorico: 'Histórico de Exclusões', aba: 'historico',
+        registros: marcados().map(id => { const x = vis.find(y => y.id === id);
+          return { id, descricao: `${TIPOS_EXCLUSAO[x.tipo] || x.tipo} · ${x.nome}${x.identificacao ? ' (' + x.identificacao + ')' : ''} · ${fmtDataHora(x.excluidoEm)} · por ${x.porNome || '—'}` }; })
+      });
+    },
+
     /* ---- Itens e estoque ---- */
     itens(p, editId) {
       const ed = editId ? item(editId) : null;
@@ -1018,12 +1277,12 @@
       // e saídas (registradas em cada solicitação).
       const movs = [
         ...dados.movimentos.map(m => ({
-          quando: m.criadoEm, itemNome: m.itemNome, tipo: m.tipo === 'inicial' ? 'Estoque inicial' : 'Entrada',
-          quantidade: m.quantidade, unidade: item(m.itemId)?.unidade ?? '', origem: m.porNome || '—', saida: false
+          id: m.id, quando: m.criadoEm, itemNome: m.itemNome, tipo: m.tipo === 'inicial' ? 'Estoque inicial' : 'Entrada',
+          quantidade: m.quantidade, unidade: unidadeDoItem(m.itemId), origem: m.porNome || '—', saida: false
         })),
         ...dados.solicitacoes.filter(estoqueBaixado).flatMap(s => itensDaSolicitacao(s).map(i => ({
           quando: dataDaBaixa(s), itemNome: i.nome, tipo: 'Saída', quantidade: qtdFornecida(s, i), unidade: i.unidade,
-          origem: `Fornecido · ${modalidade(s.modalidadeId)?.nome ?? '—'}${s.fornecidoPorNome ? ' · por ' + s.fornecidoPorNome : ''}` +
+          origem: `Fornecido · ${nomeSetor(s.modalidadeId)}${s.fornecidoPorNome ? ' · por ' + s.fornecidoPorNome : ''}` +
             (qtdFornecida(s, i) !== i.quantidade ? ` · aprovado ${qtdUn(i.quantidade, i.unidade)}, reduzido em ${qtdUn(i.quantidade - qtdFornecida(s, i), i.unidade)}` : ''),
           saida: true
         })).filter(m => m.quantidade > 0))
@@ -1078,21 +1337,34 @@
             <td class="num" style="white-space:nowrap">
               <button class="btn secundario pequeno" data-edit="${i.id}">Editar</button>
               <button class="btn secundario pequeno" data-ativo="${i.id}">${i.ativo ? 'Desativar' : 'Ativar'}</button>
+              ${botaoExcluir(i.id, 'data-excluir-item')}
             </td>
           </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhum item cadastrado.</p>'}
       </section>
 
       <section class="card">
         <h2>Movimentações de estoque</h2>
+        <p class="muted small" style="margin-top:-.3rem">Marque as entradas e estoques iniciais que deseja apagar do histórico. As saídas fazem parte das solicitações fornecidas e são apagadas junto com elas, na aba Solicitações. Apagar o histórico não altera o saldo dos itens.</p>
+        <div class="erro" id="erroMov"></div>
         ${movs.length ? `<div class="tabela-wrap"><table>
-          <thead><tr><th>Data</th><th>Item</th><th>Tipo</th><th class="num">Quantidade</th><th>Origem</th></tr></thead>
+          <thead><tr><th style="width:2.2rem"></th><th>Data</th><th>Item</th><th>Tipo</th><th class="num">Quantidade</th><th>Origem</th></tr></thead>
           <tbody>${movs.map(m => `<tr>
+            <td>${m.id ? `<input type="checkbox" class="caixa" data-sel-mov="${m.id}" aria-label="Selecionar movimentação">` : ''}</td>
             <td>${fmtDataHora(m.quando)}</td><td>${esc(m.itemNome)}</td><td>${m.tipo}</td>
             <td class="num">${m.saida ? '−' : '+'}${esc(qtdUn(m.quantidade, m.unidade))}</td><td>${esc(m.origem)}</td>
-          </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhuma movimentação registrada.</p>'}
+          </tr>`).join('')}</tbody></table></div>
+          <div class="acoes" style="margin-top:.6rem"><button class="btn perigo pequeno" id="btnExcluirMov" hidden>Excluir histórico</button></div>` : '<p class="muted">Nenhuma movimentação registrada.</p>'}
       </section>`;
 
       p.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => PAINEIS.itens(p, b.dataset.edit));
+      p.querySelectorAll('[data-excluir-item]').forEach(b => b.onclick = () => confirmarExclusaoItem(p, item(b.dataset.excluirItem)));
+      const movsMarcadas = () => [...p.querySelectorAll('[data-sel-mov]:checked')].map(c => c.dataset.selMov);
+      p.querySelectorAll('[data-sel-mov]').forEach(c => c.onchange = () => { $('btnExcluirMov').hidden = !movsMarcadas().length; });
+      if ($('btnExcluirMov')) $('btnExcluirMov').onclick = () => confirmarExclusaoHistorico(p, {
+        colecao: 'movimentos', nomeHistorico: 'Movimentações de estoque', aba: 'itens',
+        registros: movsMarcadas().map(id => { const m = dados.movimentos.find(x => x.id === id);
+          return { id, descricao: `${fmtDataHora(m.criadoEm)} · ${m.itemNome} · ${m.tipo === 'inicial' ? 'Estoque inicial' : 'Entrada'} +${qtdUn(m.quantidade, unidadeDoItem(m.itemId))}` }; })
+      });
       if (ed) $('btnCancelar').onclick = () => PAINEIS.itens(p);
 
       p.querySelectorAll('[data-ativo]').forEach(b => b.onclick = () => comBotao(b, async () => {
@@ -1162,13 +1434,13 @@
       };
     },
 
-    /* ---- Modalidades e limites ---- */
+    /* ---- Setores e limites (coleção "modalidades" no banco) ---- */
     modalidades(p) {
       p.innerHTML = `<section class="card">
-        <h2>Modalidades e limite máximo de pedidos</h2>
+        <h2>Setores e limite máximo de pedidos</h2>
         <form id="fMod" novalidate>
           <div class="tabela-wrap"><table>
-            <thead><tr><th>#</th><th>Modalidade</th><th>Limite máximo de pedidos</th><th>Responsável</th></tr></thead>
+            <thead><tr><th>#</th><th>Setor</th><th>Limite máximo de pedidos</th><th>Responsável</th><th></th></tr></thead>
             <tbody>${dados.modalidades.map((m, i) => {
               const resp = dados.usuarios.find(u => u.modalidadeId === m.id);
               return `<tr>
@@ -1176,11 +1448,13 @@
                 <td><input name="nome_${m.id}" value="${esc(m.nome)}"></td>
                 <td><input type="number" min="0" step="1" name="lim_${m.id}" value="${m.limite ?? ''}" placeholder="Não definido"></td>
                 <td>${resp ? esc(resp.nome) : '<span class="muted">—</span>'}</td>
+                <td class="num"><button type="button" class="btn perigo pequeno" data-excluir-setor="${m.id}">Excluir</button></td>
               </tr>`;
             }).join('')}</tbody></table></div>
           <div class="erro" id="erroMod" style="margin-top:.8rem"></div>
           <button class="btn primario" type="submit" id="btnMod">Salvar alterações</button>
         </form></section>`;
+      p.querySelectorAll('[data-excluir-setor]').forEach(b => b.onclick = () => confirmarExclusaoSetor(p, modalidade(b.dataset.excluirSetor)));
 
       $('fMod').onsubmit = e => {
         e.preventDefault();
@@ -1190,12 +1464,12 @@
         for (const m of dados.modalidades) {
           const nome = String(f.get('nome_' + m.id)).trim();
           const limite = inteiro(f.get('lim_' + m.id));
-          if (!nome) return erro('Todas as modalidades precisam de um nome.');
+          if (!nome) return erro('Todos os setores precisam de um nome.');
           if (Number.isNaN(limite) || (limite != null && limite < 0)) return erro(`Limite inválido para "${nome}".`);
           novos.push({ m, nome, limite });
         }
         const nomes = novos.map(n => n.nome.toLowerCase());
-        if (new Set(nomes).size !== nomes.length) return erro('Existem modalidades com nomes repetidos.');
+        if (new Set(nomes).size !== nomes.length) return erro('Existem setores com nomes repetidos.');
         const alterados = novos.filter(n => n.nome !== n.m.nome || n.limite !== (n.m.limite ?? null));
         if (!alterados.length) return erro('Nenhuma alteração para salvar.');
         comBotao($('btnMod'), async () => {
@@ -1203,7 +1477,7 @@
             const b = writeBatch(db);
             alterados.forEach(n => b.update(doc(db, 'modalidades', n.m.id), { nome: n.nome, limite: n.limite }));
             await b.commit();
-            salvo('modalidades', 'Modalidades atualizadas.');
+            salvo('modalidades', 'Setores atualizados.');
           } catch (err) { erro(msgErro(err)); }
         });
       };
@@ -1235,16 +1509,15 @@
       <section class="card">
         <h2>Paioleiros cadastrados</h2>
         ${lst.length ? `<div class="tabela-wrap"><table>
-          <thead><tr><th>Nome</th><th>Usuário/e-mail</th><th>Perfil</th><th></th></tr></thead>
+          <thead><tr>${cabecalhoSelecao()}<th>Nome</th><th>Usuário/e-mail</th><th>Perfil</th><th></th></tr></thead>
           <tbody>${lst.map(u => `<tr>
-            <td>${esc(u.nome)}</td><td>${esc(u.email)}</td><td>Paioleiro</td>
-            <td class="num" style="white-space:nowrap"><button class="btn secundario pequeno" data-edit="${u.id}">Editar</button> ${botaoExcluir(u)}</td>
-          </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhum paioleiro cadastrado.</p>'}
-      </section>
-      ${historicoExclusoesHtml(ehPerfilPaioleiro)}`;
+            ${caixaUsuario(u)}<td>${esc(u.nome)}</td><td>${esc(u.email)}</td><td>Paioleiro</td>
+            <td class="num" style="white-space:nowrap"><button class="btn secundario pequeno" data-edit="${u.id}">Editar</button> ${botaoExcluir(u.id)}</td>
+          </tr>`).join('')}</tbody></table></div>${barraLote()}` : '<p class="muted">Nenhum paioleiro cadastrado.</p>'}
+      </section>`;
 
       p.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => PAINEIS.paioleiros(p, b.dataset.edit));
-      ligarExclusao(p, 'paioleiros');
+      ligarExclusaoUsuarios(p, 'paioleiros');
       const erro = msg => { $('erroCat').textContent = msg; };
       if (ed) {
         $('btnCancelar').onclick = () => PAINEIS.paioleiros(p);
@@ -1296,7 +1569,7 @@
             <label>Nome<input name="nome" value="${esc(ed?.nome)}"></label>
             <label>Usuário/e-mail<input type="email" name="email" value="${esc(ed?.email)}" autocomplete="off" ${ed ? 'readonly' : ''}></label>
             ${ed ? '' : '<label>Senha inicial<input type="password" name="senha" autocomplete="new-password" placeholder="Mínimo de 6 caracteres"></label>'}
-            <label>Modalidade
+            <label>Setor
               <select name="modalidade">
                 <option value="">Selecione</option>
                 ${dados.modalidades.map(m => `<option value="${m.id}" ${ed?.modalidadeId === m.id ? 'selected' : ''}>${esc(m.nome)}</option>`).join('')}
@@ -1315,16 +1588,15 @@
       <section class="card">
         <h2>Responsáveis cadastrados</h2>
         ${resp.length ? `<div class="tabela-wrap"><table>
-          <thead><tr><th>Nome</th><th>Usuário/e-mail</th><th>Perfil</th><th>Modalidade</th><th></th></tr></thead>
+          <thead><tr>${cabecalhoSelecao()}<th>Nome</th><th>Usuário/e-mail</th><th>Perfil</th><th>Setor</th><th></th></tr></thead>
           <tbody>${resp.map(u => `<tr>
-            <td>${esc(u.nome)}</td><td>${esc(u.email)}</td><td>Responsável</td><td>${esc(modalidade(u.modalidadeId)?.nome ?? '—')}</td>
-            <td class="num" style="white-space:nowrap"><button class="btn secundario pequeno" data-edit="${u.id}">Editar</button> ${botaoExcluir(u)}</td>
-          </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhum responsável cadastrado.</p>'}
-      </section>
-      ${historicoExclusoesHtml(x => x.perfil === 'responsavel')}`;
+            ${caixaUsuario(u)}<td>${esc(u.nome)}</td><td>${esc(u.email)}</td><td>Responsável</td><td>${esc(nomeSetor(u.modalidadeId))}</td>
+            <td class="num" style="white-space:nowrap"><button class="btn secundario pequeno" data-edit="${u.id}">Editar</button> ${botaoExcluir(u.id)}</td>
+          </tr>`).join('')}</tbody></table></div>${barraLote()}` : '<p class="muted">Nenhum responsável cadastrado.</p>'}
+      </section>`;
 
       p.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => PAINEIS.responsaveis(p, b.dataset.edit));
-      ligarExclusao(p, 'responsaveis');
+      ligarExclusaoUsuarios(p, 'responsaveis');
       const erro = msg => { $('erroResp').textContent = msg; };
 
       if (ed) {
@@ -1348,9 +1620,9 @@
         if (!nome) return erro('Informe o nome.');
         if (!ed && !/^\S+@\S+\.\S+$/.test(email)) return erro('Informe um e-mail válido.');
         if (!ed && senha.length < 6) return erro('A senha inicial deve ter pelo menos 6 caracteres.');
-        if (!modId) return erro('Selecione a modalidade.');
+        if (!modId) return erro('Selecione o setor.');
         const ocupante = dados.usuarios.find(u => u.modalidadeId === modId && u.id !== ed?.id);
-        if (ocupante) return erro(`A modalidade selecionada já possui o responsável ${ocupante.nome}.`);
+        if (ocupante) return erro(`O setor selecionado já possui o responsável ${ocupante.nome}.`);
 
         comBotao($('btnResp'), async () => {
           try {

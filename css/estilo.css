@@ -172,3 +172,14 @@ tr.linha-registro:hover td{background:#fffaf0}
 .btn.perigo-cheio{background:var(--erro);color:var(--branco)}
 .btn.perigo-cheio:hover:not(:disabled){background:#912018}
 .card.exclusao{border-top-color:var(--erro);background:linear-gradient(180deg,#fff7f6,var(--branco) 120px)}
+
+/* ===== Seleção em lote, histórico de exclusões ===== */
+.caixa{width:1.05rem;height:1.05rem;margin:0;vertical-align:middle;accent-color:var(--azul-700)}
+.barra-lote{display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap;margin-top:.7rem;padding:.6rem .8rem;background:var(--azul-100);border:1px solid var(--azul-200);border-radius:8px;font-weight:600;color:var(--azul-800)}
+.barra-lote[hidden]{display:none}
+.abas .aba-icone{margin-left:auto;color:var(--branco);background:rgba(255,255,255,.08);border-radius:8px 8px 0 0}
+.abas .aba-icone:hover{background:rgba(255,255,255,.16)}
+.lista-exclusao{max-height:220px;overflow:auto;margin:.3rem 0 .8rem;padding-left:1.2rem;font-size:.88rem}
+.aviso-perigo{background:var(--erro-fundo);color:var(--erro);border-left:4px solid var(--erro);padding:.6rem .8rem;border-radius:8px;font-weight:600;margin-bottom:.6rem}
+tr.linha-falha td{background:#fff6f5}
+.filtros-hist label{margin-bottom:.6rem}
