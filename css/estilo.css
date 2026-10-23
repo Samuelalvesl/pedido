@@ -165,3 +165,10 @@ tr.grupo-data:hover td{background:var(--azul-800)}
 tr.linha-registro td{background:#fffaf0;border-bottom:1px solid #f3d29a;padding:.5rem .7rem .8rem}
 tr.linha-registro:hover td{background:#fffaf0}
 .registro-titulo{font-weight:700;font-size:.85rem;color:#8a5300;margin-bottom:.3rem}
+
+/* ===== Exclusão de usuários ===== */
+.btn.perigo{background:var(--branco);border-color:#f0b4ae;color:var(--erro)}
+.btn.perigo:hover:not(:disabled){background:var(--erro-fundo)}
+.btn.perigo-cheio{background:var(--erro);color:var(--branco)}
+.btn.perigo-cheio:hover:not(:disabled){background:#912018}
+.card.exclusao{border-top-color:var(--erro);background:linear-gradient(180deg,#fff7f6,var(--branco) 120px)}

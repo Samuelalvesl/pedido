@@ -76,7 +76,7 @@
   let ctxSol = CTX_ADMIN;
 
   function vazio() {
-    return { modalidades: [], eventos: [], usuarios: [], solicitacoes: [], itens: [], movimentos: [] };
+    return { modalidades: [], eventos: [], usuarios: [], solicitacoes: [], itens: [], movimentos: [], exclusoes: [] };
   }
 
   /* ---------- Utilitários ---------- */
@@ -130,7 +130,7 @@
     if (['auth/invalid-credential', 'auth/wrong-password', 'auth/user-not-found', 'auth/invalid-email', 'auth/invalid-login-credentials'].includes(c))
       return 'E-mail ou senha inválidos.';
     if (c === 'auth/too-many-requests') return 'Muitas tentativas. Aguarde alguns minutos e tente novamente.';
-    if (c === 'auth/email-already-in-use') return 'Este e-mail já possui um acesso cadastrado.';
+    if (c === 'auth/email-already-in-use') return 'Este e-mail já possui um login no Firebase Authentication (pode ser de um usuário excluído). Remova-o em Firebase → Authentication → Usuários e tente novamente.';
     if (c === 'auth/weak-password') return 'A senha deve ter pelo menos 6 caracteres.';
     if (c === 'auth/network-request-failed' || c === 'unavailable') return 'Sem conexão com a internet. Tente novamente.';
     if (c === 'permission-denied') return 'Você não tem permissão para realizar esta operação.';
@@ -245,7 +245,7 @@
     app.innerHTML = CARREGANDO;
     try {
       const s = await getDoc(doc(db, 'usuarios', user.uid));
-      if (!s.exists()) return sair('Seu acesso ainda não foi configurado. Procure o Administrador.');
+      if (!s.exists()) return sair('Seu acesso não está ativo (não configurado ou excluído). Procure o Administrador.');
       perfil = { uid: user.uid, ...s.data() };
       if (perfil.perfil === 'admin') { filtroSolicitacoes = 'todas'; ctxSol = CTX_ADMIN; return telaAdmin('solicitacoes', '', true); }
       if (ehPerfilPaioleiro(perfil)) { filtroSolicitacoes = 'recebidos'; ctxSol = CTX_PAIOLEIRO; return telaPaioleiro(); }
@@ -598,10 +598,11 @@
     if (recarregar) {
       app.innerHTML = CARREGANDO;
       try {
-        const [modalidades, eventos, usuarios, solicitacoes, itens, movimentos] = await Promise.all([
-          garantirModalidades(), lista('eventos').catch(() => []), lista('usuarios'), lista('solicitacoes'), lista('itens'), lista('movimentos')
+        const [modalidades, eventos, usuarios, solicitacoes, itens, movimentos, exclusoes] = await Promise.all([
+          garantirModalidades(), lista('eventos').catch(() => []), lista('usuarios'), lista('solicitacoes'), lista('itens'), lista('movimentos'),
+          lista('exclusoes').catch(() => [])
         ]);
-        dados = { modalidades, eventos, usuarios, solicitacoes, itens, movimentos };
+        dados = { modalidades, eventos, usuarios, solicitacoes, itens, movimentos, exclusoes };
       } catch (e) {
         return telaFalha('Administrador', e, () => telaAdmin(aba, '', true));
       }
@@ -631,6 +632,76 @@
     } finally {
       await deleteApp(appCadastro);
     }
+  }
+
+  /* ================= Exclusão de usuários (somente Administrador) ================= */
+  // Exclui o cadastro do usuário (coleção "usuarios") e registra a exclusão em "exclusoes",
+  // na mesma gravação. Sem o cadastro, o Firebase bloqueia todo o acesso aos dados
+  // (regras do Firestore) e o sistema não permite entrar. Solicitações, fornecimentos,
+  // registros de alteração e movimentações NÃO são apagados e mantêm o nome do usuário.
+  // O login no Firebase Authentication é removido pelo Administrador no Console
+  // (no plano gratuito, o navegador não pode apagar o login de outra pessoa).
+  const nomePerfil = u => u.perfil === 'responsavel' ? 'Responsável' : ehPerfilPaioleiro(u) ? 'Paioleiro' : 'Administrador';
+  const botaoExcluir = u => `<button class="btn perigo pequeno" data-excluir="${u.id}">Excluir</button>`;
+
+  function ligarExclusao(p, aba) {
+    p.querySelectorAll('[data-excluir]').forEach(b => b.onclick = () => {
+      const u = dados.usuarios.find(x => x.id === b.dataset.excluir);
+      if (!u) return;
+      $('secExcluir')?.remove();
+      const bloqueio = u.id === perfil.uid ? 'Você não pode excluir a própria conta.'
+        : u.perfil === 'admin' ? 'Contas de Administrador não podem ser excluídas pelo sistema.' : '';
+      p.insertAdjacentHTML('afterbegin', `
+      <section class="card exclusao" id="secExcluir">
+        <h2>Excluir usuário</h2>
+        <dl class="resumo">
+          <dt>Nome</dt><dd>${esc(u.nome)}</dd>
+          <dt>Login</dt><dd>${esc(u.email || '—')}</dd>
+          <dt>Perfil</dt><dd>${esc(nomePerfil(u))}</dd>
+          ${u.perfil === 'responsavel' ? `<dt>Modalidade</dt><dd>${esc(modalidade(u.modalidadeId)?.nome ?? '—')}</dd>` : ''}
+        </dl>
+        <p class="small">O cadastro será <strong>excluído</strong> e o acesso ao sistema ficará <strong>bloqueado imediatamente</strong>.
+          Solicitações, fornecimentos, registros de alteração de quantidade e movimentações de estoque <strong>não serão apagados</strong>
+          e continuarão identificando este usuário pelo nome.</p>
+        <div class="erro" id="erroExcluir">${esc(bloqueio)}</div>
+        <div class="acoes">
+          <button class="btn secundario" id="btnCancelarExcluir">Cancelar</button>
+          <button class="btn perigo-cheio" id="btnConfirmarExcluir" ${bloqueio ? 'disabled' : ''}>Confirmar exclusão</button>
+        </div>
+      </section>`);
+      $('secExcluir').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+      $('btnCancelarExcluir').onclick = () => $('secExcluir').remove();
+      $('btnConfirmarExcluir').onclick = () => comBotao($('btnConfirmarExcluir'), async () => {
+        try {
+          const lote = writeBatch(db);
+          lote.delete(doc(db, 'usuarios', u.id));
+          lote.set(doc(db, 'exclusoes', u.id), {
+            nome: u.nome, email: u.email || '', perfil: u.perfil, modalidadeId: u.modalidadeId || null,
+            excluidoEm: serverTimestamp(), porUid: perfil.uid, porNome: perfil.nome
+          });
+          await lote.commit();
+          salvo(aba, `Usuário ${u.nome} (${nomePerfil(u)}) excluído. O acesso ao sistema foi bloqueado. ` +
+            `Para concluir, remova o login ${u.email} em Firebase → Authentication → Usuários.`);
+        } catch (err) {
+          $('erroExcluir').textContent = 'Não foi possível excluir: ' + msgErro(err) + ' Nada foi alterado; tente novamente.';
+        }
+      });
+    });
+  }
+
+  function historicoExclusoesHtml(filtro) {
+    const l = (dados.exclusoes || []).filter(filtro).sort((a, b) => ms(b.excluidoEm) - ms(a.excluidoEm));
+    if (!l.length) return '';
+    return `<section class="card">
+      <h2>Usuários excluídos</h2>
+      <p class="muted small" style="margin-top:-.3rem">Histórico para auditoria. Se ainda não fez, remova o login de cada um em Firebase → Authentication → Usuários.</p>
+      <div class="tabela-wrap"><table>
+        <thead><tr><th>Nome</th><th>Login</th><th>Perfil</th><th>Excluído em</th><th>Por</th></tr></thead>
+        <tbody>${l.map(x => `<tr class="linha-inativa">
+          <td>${esc(x.nome)}</td><td>${esc(x.email)}</td><td>${esc(nomePerfil(x))}${x.modalidadeId ? ' · ' + esc(modalidade(x.modalidadeId)?.nome ?? '') : ''}</td>
+          <td>${fmtDataHora(x.excluidoEm)}</td><td>${esc(x.porNome || '—')}</td>
+        </tr>`).join('')}</tbody></table></div>
+    </section>`;
   }
 
   /* ================= Paioleiro ================= */
@@ -1164,14 +1235,16 @@
       <section class="card">
         <h2>Paioleiros cadastrados</h2>
         ${lst.length ? `<div class="tabela-wrap"><table>
-          <thead><tr><th>Nome</th><th>Usuário/e-mail</th><th></th></tr></thead>
+          <thead><tr><th>Nome</th><th>Usuário/e-mail</th><th>Perfil</th><th></th></tr></thead>
           <tbody>${lst.map(u => `<tr>
-            <td>${esc(u.nome)}</td><td>${esc(u.email)}</td>
-            <td class="num"><button class="btn secundario pequeno" data-edit="${u.id}">Editar</button></td>
+            <td>${esc(u.nome)}</td><td>${esc(u.email)}</td><td>Paioleiro</td>
+            <td class="num" style="white-space:nowrap"><button class="btn secundario pequeno" data-edit="${u.id}">Editar</button> ${botaoExcluir(u)}</td>
           </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhum paioleiro cadastrado.</p>'}
-      </section>`;
+      </section>
+      ${historicoExclusoesHtml(ehPerfilPaioleiro)}`;
 
       p.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => PAINEIS.paioleiros(p, b.dataset.edit));
+      ligarExclusao(p, 'paioleiros');
       const erro = msg => { $('erroCat').textContent = msg; };
       if (ed) {
         $('btnCancelar').onclick = () => PAINEIS.paioleiros(p);
@@ -1242,14 +1315,16 @@
       <section class="card">
         <h2>Responsáveis cadastrados</h2>
         ${resp.length ? `<div class="tabela-wrap"><table>
-          <thead><tr><th>Nome</th><th>Usuário/e-mail</th><th>Modalidade</th><th></th></tr></thead>
+          <thead><tr><th>Nome</th><th>Usuário/e-mail</th><th>Perfil</th><th>Modalidade</th><th></th></tr></thead>
           <tbody>${resp.map(u => `<tr>
-            <td>${esc(u.nome)}</td><td>${esc(u.email)}</td><td>${esc(modalidade(u.modalidadeId)?.nome ?? '—')}</td>
-            <td class="num"><button class="btn secundario pequeno" data-edit="${u.id}">Editar</button></td>
+            <td>${esc(u.nome)}</td><td>${esc(u.email)}</td><td>Responsável</td><td>${esc(modalidade(u.modalidadeId)?.nome ?? '—')}</td>
+            <td class="num" style="white-space:nowrap"><button class="btn secundario pequeno" data-edit="${u.id}">Editar</button> ${botaoExcluir(u)}</td>
           </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhum responsável cadastrado.</p>'}
-      </section>`;
+      </section>
+      ${historicoExclusoesHtml(x => x.perfil === 'responsavel')}`;
 
       p.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => PAINEIS.responsaveis(p, b.dataset.edit));
+      ligarExclusao(p, 'responsaveis');
       const erro = msg => { $('erroResp').textContent = msg; };
 
       if (ed) {
