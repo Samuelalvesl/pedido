@@ -190,6 +190,8 @@
   const unidadeDoItem = id => item(id)?.unidade ?? (dados.exclusoes || []).find(x => x.tipo === 'item' && x.refId === id)?.unidade ?? '';
   // Fluxo: pendente -> recebido ("Pedido Recebido") -> fornecido ("Fornecido" + baixa no estoque).
   // "atendido" existe apenas em solicitações antigas (anteriores a este fluxo).
+  // Solicitação registrada pelo Administrador ("Nova Solicitação").
+  const criadaPeloAdmin = s => s.criadoPorAdmin === true;
   const statusDe = s => ['recebido', 'fornecido', 'atendido'].includes(s.status) ? s.status : 'pendente';
   const grupoDe = s => ({ pendente: 'pendentes', recebido: 'recebidos', fornecido: 'fornecidos', atendido: 'fornecidos' })[statusDe(s)];
   const classeLinha = s => ({ pendente: 'linha-pendente', recebido: 'linha-recebida', fornecido: 'linha-atendida', atendido: 'linha-atendida' })[statusDe(s)];
@@ -362,7 +364,7 @@
         ${minhas.length ? `<div class="tabela-wrap"><table>
           <thead><tr><th>Data da retirada</th><th>Retirada</th><th class="num">Quantidade</th><th>Itens</th><th>Status</th><th>Registrada em</th></tr></thead>
           <tbody>${minhas.map(s => `<tr class="${classeLinha(s)}">
-            <td><strong>${esc(fmtDataSemana(dataDe(s)))}</strong></td>
+            <td><strong>${esc(fmtDataSemana(dataDe(s)))}</strong>${criadaPeloAdmin(s) ? ' <span class="selo-admin">Criada pelo Administrador</span>' : ''}</td>
             <td>${esc(textoRetirada(s))}</td>
             <td class="num">${fmtQtd(s.quantidade)}</td>
             <td>${listaItensHtml(s)}</td>
@@ -380,14 +382,15 @@
   // Limite diário de QUANTIDADE do setor (campo "limite" do setor, definido pelo
   // Administrador): a soma das quantidades de todas as solicitações do setor na mesma
   // data não pode ultrapassá-lo. É independente do limite de NÚMERO de pedidos por dia.
-  function msgLimiteModalidade(m, jaSolicitado, tentando) {
-    if (m.limite == null) return 'O limite diário de quantidade deste setor ainda não foi definido pelo Administrador.';
-    const disp = Math.max(0, arred(m.limite - jaSolicitado));
-    return `Limite diário de quantidade ultrapassado.\n` +
-      `• Limite diário definido pelo Administrador: ${fmtQtd(m.limite)}\n` +
-      `• Quantidade já solicitada nesta data: ${fmtQtd(jaSolicitado)}\n` +
-      `• Quantidade ainda disponível: ${fmtQtd(disp)}\n` +
-      `• Quantidade que você está tentando solicitar: ${fmtQtd(tentando)}`;
+  // O limite de quantidade do setor (campo "limite") vale para CADA item: na mesma data,
+  // a soma dos pedidos do setor de um item não pode passar dele (ex.: limite 20 → até
+  // 20 L de água, 20 kg de café...). Solicitações feitas pelo Administrador não contam.
+  const MSG_SEM_LIMITE = 'O limite de quantidade deste setor ainda não foi definido pelo Administrador.';
+  function msgLimiteItem(m, it, ja, tentando, admin) {
+    if (admin) return `${it.nome}: o limite do setor ${m.nome} é de ${qtdUn(m.limite, it.unidade)} por item nesta solicitação (informado: ${qtdUn(tentando, it.unidade)}).`;
+    const disp = Math.max(0, arred(m.limite - ja));
+    return `${it.nome}: o limite do setor ${m.nome} é de ${qtdUn(m.limite, it.unidade)} por item na data. ` +
+      `Já solicitado: ${qtdUn(ja, it.unidade)} · disponível: ${qtdUn(disp, it.unidade)} · informado: ${qtdUn(tentando, it.unidade)}.`;
   }
   const msgPrazoEncerrado = dt => `O prazo para solicitar para ${fmtData(dt)} encerrou às ${PRAZO_TEXTO} (horário de Brasília). Não é mais possível solicitar para esta data.`;
   const MSG_DATA_PASSADA = 'Não é possível solicitar para datas anteriores a hoje.';
@@ -397,18 +400,23 @@
   // ocupa a posição seguinte (id {setor}_{data}_{n}). Conta solicitações, não itens.
   const limiteDia = m => (Number.isInteger(m?.limiteDiario) && m.limiteDiario >= 1) ? m.limiteDiario : 1;
   const idContador = (setorId, dt) => `${setorId}_${dt}`;
+  // Solicitações do próprio setor na data (as do Administrador ficam fora dos limites diários).
+  const solsDoSetorNaData = dt => dados.solicitacoes.filter(s => dataDe(s) === dt && !criadaPeloAdmin(s));
   function usadosNaData(dt) {
     const c = (dados.contadores || []).find(x => x.data === dt);
-    return Math.max(c ? c.n || 0 : 0, dados.solicitacoes.filter(s => dataDe(s) === dt).length);
+    return Math.max(c ? c.n || 0 : 0, solsDoSetorNaData(dt).length);
   }
-  // Soma das quantidades já solicitadas pelo setor na data (contador no Firebase).
-  function quantidadeNaData(dt) {
+  // Total já contado de um item no contador da data. Contadores anteriores à contagem
+  // por item usam o total antigo do dia para todos os itens ("legado"): o Firebase faz a mesma conta.
+  const legadoDoContador = c => c ? (c.legado ?? (c.total || 0)) : 0;
+  const itemNoContador = (c, id) => !c ? 0 : (c.itens && c.itens[id] != null ? c.itens[id] : legadoDoContador(c));
+  // Quantidade de um item já solicitada pelo setor na data.
+  function quantidadeItemNaData(dt, id) {
     const c = (dados.contadores || []).find(x => x.data === dt);
-    const soma = arred(dados.solicitacoes.filter(s => dataDe(s) === dt).reduce((t, s) => t + (s.quantidade || 0), 0));
-    return Math.max(c ? c.total || 0 : 0, soma);
+    const soma = arred(solsDoSetorNaData(dt).reduce((t, s) => t + ((s.itens && s.itens[id]) ? s.itens[id].quantidade || 0 : 0), 0));
+    return Math.max(itemNoContador(c, id), soma);
   }
-  const disponivelNaData = (mod, dt) => mod.limite == null ? 0 : Math.max(0, arred(mod.limite - quantidadeNaData(dt)));
-  const msgQuantidadeEsgotada = (mod, dt) => `Seu setor já solicitou toda a quantidade diária permitida para ${fmtData(dt)} (limite diário: ${fmtQtd(mod.limite ?? 0)}). Não é possível fazer novas solicitações para esta data.`;
+  const disponivelItemNaData = (mod, dt, id) => mod.limite == null ? 0 : Math.max(0, arred(mod.limite - quantidadeItemNaData(dt, id)));
   const restantesNaData = (mod, dt) => Math.max(0, limiteDia(mod) - usadosNaData(dt));
   const msgLimiteDiario = (mod, dt) => `Seu setor já atingiu o limite diário de ${plural(limiteDia(mod), 'pedido', 'pedidos')} para ${fmtData(dt)}. Não é possível fazer novas solicitações para esta data.`;
 
@@ -427,11 +435,11 @@
       const dt = isoData(ano, mes, dia);
       const sit = situacaoData(dt);
       const usados = usadosNaData(dt);
-      const cheio = usados >= limite || (mod.limite != null && !(disponivelNaData(mod, dt) > EPS));
+      const cheio = usados >= limite;
       const classes = ['dia', sit, dt === hoje ? 'hoje' : '', cheio ? 'solicitado' : usados ? 'parcial' : '', dt === dataSelecionada ? 'selecionado' : ''].join(' ');
       const titulo = sit === 'passada' ? 'Data anterior a hoje'
         : sit === 'encerrada' ? `Prazo encerrado (${PRAZO_TEXTO})`
-        : cheio ? `Limite diário atingido (${usados}/${limite} pedidos; ${fmtQtd(quantidadeNaData(dt))} de ${fmtQtd(mod.limite ?? 0)} em quantidade)` : usados ? `${usados} de ${limite} pedidos feitos` : 'Disponível';
+        : cheio ? `Limite diário atingido (${usados}/${limite} pedidos)` : usados ? `${usados} de ${limite} pedidos feitos` : 'Disponível';
       celulas += `<button type="button" class="${classes}" data-dia="${dt}" ${sit === 'passada' ? 'disabled' : ''} title="${titulo}" aria-label="${fmtData(dt)}: ${titulo}">
         <span class="num-dia">${dia}</span>${usados ? `<span class="marca-dia">${cheio ? '✓' : ''}${limite > 1 ? `${usados}/${limite}` : ''}</span>` : sit === 'encerrada' ? '<span class="marca-dia">⏱</span>' : ''}
       </button>`;
@@ -439,7 +447,7 @@
 
     $('secCalendario').innerHTML = `
       <h2>Escolha a data da retirada</h2>
-      <p class="muted small" style="margin-top:-.3rem">Solicitações até as <strong>${PRAZO_TEXTO} do próprio dia</strong> da retirada (horário de Brasília). Retirada sempre das <strong>${RETIRADA_TEXTO}</strong>. Limites diários do seu setor: <strong>${plural(limiteDia(mod), 'pedido', 'pedidos')}</strong> e <strong>${mod.limite != null ? fmtQtd(mod.limite) : '—'} de quantidade</strong> (soma de todos os pedidos da data).</p>
+      <p class="muted small" style="margin-top:-.3rem">Solicitações até as <strong>${PRAZO_TEXTO} do próprio dia</strong> da retirada (horário de Brasília). Retirada sempre das <strong>${RETIRADA_TEXTO}</strong>. Limites do seu setor por data: <strong>${plural(limiteDia(mod), 'pedido', 'pedidos')}</strong> e <strong>até ${mod.limite != null ? fmtQtd(mod.limite) : '—'} de cada item</strong> (soma dos pedidos da data).</p>
       <div class="calendario">
         <div class="cal-topo">
           <button type="button" class="btn secundario pequeno" id="calAnt" ${mesAtual ? 'disabled' : ''} aria-label="Mês anterior">‹</button>
@@ -465,7 +473,6 @@
       if (sit === 'passada') return desenharCalendario(mod, MSG_DATA_PASSADA);
       if (sit === 'encerrada') { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, msgPrazoEncerrado(dt)); }
       if (restantesNaData(mod, dt) <= 0) { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, msgLimiteDiario(mod, dt)); }
-      if (mod.limite != null && !(disponivelNaData(mod, dt) > EPS)) { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, msgQuantidadeEsgotada(mod, dt)); }
       dataSelecionada = dt;
       desenharCalendario(mod);
       formularioSolicitacao(mod, { data: dt });
@@ -474,30 +481,70 @@
   }
 
   // Validação usada no formulário e novamente antes de gravar (com dados atualizados).
-  // Cada item marcado recebe a mesma quantidade solicitada.
+  // Cada item tem a sua quantidade (d.pedidos = [{ id, quantidade }]).
+  // jaPorItem(id): quanto do item o setor já pediu na data (não se aplica ao Administrador).
   // A baixa no estoque só ocorre quando o pedido é marcado como "Fornecido".
-  function validarSolicitacao(mod, d, catalogo, jaSolicitado = 0) {
+  function validarSolicitacao(mod, d, catalogo, jaPorItem = () => 0, admin = false) {
     const erros = [], itens = [];
-    const sit = situacaoData(d.data);
-    if (sit === 'passada') erros.push(MSG_DATA_PASSADA);
-    if (sit === 'encerrada') erros.push(msgPrazoEncerrado(d.data));
-    if (mod.limite == null || maior(jaSolicitado + d.quantidade, mod.limite)) erros.push(msgLimiteModalidade(mod, jaSolicitado, d.quantidade));
-    if (!d.itemIds.length) erros.push('Selecione pelo menos um item para compor o pedido.');
-    if (d.itemIds.length > MAX_ITENS_POR_SOLICITACAO) erros.push(`Selecione no máximo ${MAX_ITENS_POR_SOLICITACAO} itens por solicitação.`);
-    for (const id of d.itemIds) {
+    if (!admin) {
+      const sit = situacaoData(d.data);
+      if (sit === 'passada') erros.push(MSG_DATA_PASSADA);
+      if (sit === 'encerrada') erros.push(msgPrazoEncerrado(d.data));
+    }
+    if (mod.limite == null) erros.push(MSG_SEM_LIMITE);
+    if (!d.pedidos.length) erros.push('Informe a quantidade de pelo menos um item.');
+    if (d.pedidos.length > MAX_ITENS_POR_SOLICITACAO) erros.push(`Informe no máximo ${MAX_ITENS_POR_SOLICITACAO} itens por solicitação.`);
+    for (const { id, quantidade } of d.pedidos) {
       const atual = catalogo.find(c => c.id === id);
       if (!atual || !atual.ativo) { erros.push('Um dos itens selecionados não está mais disponível.'); continue; }
-      const total = d.quantidade;
-      if (maior(total, atual.saldo))
-        erros.push(`${atual.nome}: estoque insuficiente (necessário ${qtdUn(total, atual.unidade)}; disponível ${qtdUn(Math.max(atual.saldo, 0), atual.unidade)}).`);
-      itens.push({ id, nome: atual.nome, unidade: atual.unidade, quantidade: total });
+      if (mod.limite != null) {
+        const ja = admin ? 0 : jaPorItem(id);
+        if (maior(arred(ja + quantidade), mod.limite)) erros.push(msgLimiteItem(mod, atual, ja, quantidade, admin));
+      }
+      if (maior(quantidade, atual.saldo))
+        erros.push(`${atual.nome}: estoque insuficiente (necessário ${qtdUn(quantidade, atual.unidade)}; disponível ${qtdUn(Math.max(atual.saldo, 0), atual.unidade)}).`);
+      itens.push({ id, nome: atual.nome, unidade: atual.unidade, quantidade });
     }
     return { erros, itens };
+  }
+  const somaItens = itens => arred(itens.reduce((t, i) => t + i.quantidade, 0));
+
+  // Tabela ITEM → UNIDADE → QUANTIDADE (Responsável e Nova Solicitação do Administrador).
+  function tabelaItensQuantidade(disponiveis, valores, dica) {
+    return `<div class="tabela-wrap"><table class="tabela-qtd">
+      <thead><tr><th>Item</th><th>Unidade</th><th class="num">Quantidade</th></tr></thead>
+      <tbody>${disponiveis.map(i => {
+        const semEstoque = !(i.saldo > EPS), v = (valores || {})[i.id];
+        const info = semEstoque ? '' : dica(i);
+        return `<tr class="${semEstoque ? 'linha-inativa' : ''}${v ? ' marcado' : ''}" data-linha-item="${i.id}">
+          <td><strong>${esc(i.nome)}</strong>${semEstoque ? ' <span class="status inativo">Sem estoque</span>' : ''}${info ? `<div class="small muted dica-item">${info}</div>` : ''}</td>
+          <td>${esc(i.unidade)}</td>
+          <td class="num"><input type="text" inputmode="decimal" data-qtd-item="${i.id}" placeholder="0" value="${v ? editavel(v) : ''}" ${semEstoque ? 'disabled' : ''} aria-label="Quantidade de ${esc(i.nome)} (${esc(i.unidade)})"></td>
+        </tr>`;
+      }).join('')}</tbody></table></div>`;
+  }
+  function ligarTabelaQuantidade(raiz) {
+    raiz.querySelectorAll('[data-qtd-item]').forEach(inp => inp.oninput = () => {
+      const n = paraNumero(inp.value);
+      inp.closest('tr').classList.toggle('marcado', n != null && !Number.isNaN(n) && n > EPS);
+    });
+  }
+  // Lê as quantidades digitadas. Devolve { pedidos, erro }.
+  function lerQuantidades(raiz) {
+    const pedidos = [];
+    for (const inp of raiz.querySelectorAll('[data-qtd-item]:not([disabled])')) {
+      const n = paraNumero(inp.value);
+      if (n == null || (!Number.isNaN(n) && !(n > EPS))) continue;          // em branco ou zero: item não pedido
+      const nome = item(inp.dataset.qtdItem)?.nome || 'Item';
+      if (Number.isNaN(n)) return { erro: `${nome}: quantidade inválida (${DICA_DECIMAL}; até 3 casas decimais).` };
+      pedidos.push({ id: inp.dataset.qtdItem, quantidade: n });
+    }
+    return { pedidos };
   }
 
   function formularioSolicitacao(mod, valores) {
     const disponiveis = itensOrdenados().filter(i => i.ativo);
-    const marcado = id => (valores.itemIds || []).includes(id);
+    const qtdIniciais = {}; (valores.itens || []).forEach(i => { qtdIniciais[i.id] = i.quantidade; });
     const sec = $('secSolicitacao');
     sec.hidden = false;
     sec.innerHTML = `
@@ -511,28 +558,18 @@
           <span class="small">Horário fixo para todas as solicitações.</span>
         </div>
         <p class="muted small" style="margin-top:-.3rem">Prazo para enviar: até as ${PRAZO_TEXTO} de ${esc(fmtData(valores.data))} (horário de Brasília).</p>
-        <div class="aviso" id="avisoRestantes">Para esta data você ainda pode fazer <strong>${plural(restantesNaData(mod, valores.data), 'pedido', 'pedidos')}</strong> (limite: ${plural(limiteDia(mod), 'pedido', 'pedidos')} por dia)
-          e solicitar até <strong>${fmtQtd(disponivelNaData(mod, valores.data))}</strong> de quantidade (limite diário: ${mod.limite != null ? fmtQtd(mod.limite) : 'não definido'}; já solicitado: ${fmtQtd(quantidadeNaData(valores.data))}).</div>
-        <label>Quantidade
-          <input type="text" id="inpQtd" inputmode="decimal" placeholder="ex.: 10 ou 2,5" value="${editavel(valores.quantidade)}">
-        </label>
-        <p class="muted small" style="margin-top:-.5rem">
-          ${mod.limite != null ? `A soma dos pedidos do setor na data não pode passar de ${fmtQtd(mod.limite)}.` : 'Limite diário de quantidade ainda não definido pelo Administrador.'}
-        </p>
+        <div class="aviso" id="avisoRestantes">Para esta data você ainda pode fazer <strong>${plural(restantesNaData(mod, valores.data), 'pedido', 'pedidos')}</strong> (limite: ${plural(limiteDia(mod), 'pedido', 'pedidos')} por dia).
+          ${mod.limite != null ? `Limite do setor: <strong>até ${fmtQtd(mod.limite)} de cada item</strong> na data (soma dos pedidos do dia).` : esc(MSG_SEM_LIMITE)}</div>
 
         <h3 style="font-size:1rem;margin-top:1rem">Itens do pedido</h3>
         ${disponiveis.length ? `
-        <p class="muted small" style="margin-top:-.3rem">Marque os itens que vão compor o pedido (até ${MAX_ITENS_POR_SOLICITACAO} itens). Cada item marcado terá a mesma quantidade solicitada.</p>
-        <div class="tabela-wrap itens-sol"><table>
-          <thead><tr><th style="width:2.5rem"></th><th>Item</th><th>Unidade</th></tr></thead>
-          <tbody>${disponiveis.map(i => {
-            const semEstoque = !(i.saldo > EPS);
-            return `<tr class="${semEstoque ? 'linha-inativa' : ''}">
-              <td><input type="checkbox" data-item="${i.id}" ${marcado(i.id) ? 'checked' : ''} ${semEstoque ? 'disabled' : ''} aria-label="${esc(i.nome)}" style="width:1.1rem;height:1.1rem;margin:0"></td>
-              <td>${esc(i.nome)}${semEstoque ? ' <span class="status inativo">Sem estoque</span>' : ''}</td>
-              <td>${esc(i.unidade)}</td>
-            </tr>`;
-          }).join('')}</tbody></table></div>` : '<p class="muted">Nenhum item disponível no momento.</p>'}
+        <p class="muted small" style="margin-top:-.3rem">Informe a quantidade de cada item desejado (até ${MAX_ITENS_POR_SOLICITACAO} itens). Deixe em branco os itens que não quiser.</p>
+        ${tabelaItensQuantidade(disponiveis, qtdIniciais, i => {
+          if (mod.limite == null) return '';
+          const ja = quantidadeItemNaData(valores.data, i.id);
+          return ja > EPS ? `disponível nesta data: <strong>${esc(qtdUn(disponivelItemNaData(mod, valores.data, i.id), i.unidade))}</strong> de ${esc(fmtQtd(mod.limite))}`
+            : `até ${esc(qtdUn(mod.limite, i.unidade))} na data`;
+        })}` : '<p class="muted">Nenhum item disponível no momento.</p>'}
 
         <div class="erro" id="erroSol" style="margin-top:1rem"></div>
         <div class="acoes">
@@ -542,15 +579,15 @@
       </form>`;
 
     $('btnTrocarData').onclick = () => { dataSelecionada = null; sec.hidden = true; desenharCalendario(mod); };
+    ligarTabelaQuantidade(sec);
     $('fSol').onsubmit = e => {
       e.preventDefault();
       const erro = msg => { $('erroSol').textContent = msg; };
-      const quantidade = paraNumero($('inpQtd').value);
       if (restantesNaData(mod, valores.data) <= 0) return erro(msgLimiteDiario(mod, valores.data));
-      if (quantidade == null || Number.isNaN(quantidade) || !(quantidade > EPS)) return erro(`Informe uma quantidade válida, maior que zero (${DICA_DECIMAL}; até 3 casas decimais).`);
-      const itemIds = [...document.querySelectorAll('[data-item]:checked')].map(c => c.dataset.item);
-      const d = { data: valores.data, quantidade, itemIds };
-      const { erros, itens } = validarSolicitacao(mod, d, dados.itens, quantidadeNaData(d.data));
+      const lidas = lerQuantidades($('fSol'));
+      if (lidas.erro) return erro(lidas.erro);
+      const d = { data: valores.data, pedidos: lidas.pedidos };
+      const { erros, itens } = validarSolicitacao(mod, d, dados.itens, id => quantidadeItemNaData(d.data, id));
       if (erros.length) return erro(erros.join('\n'));
       d.itens = itens;
       resumoSolicitacao(mod, d);
@@ -565,7 +602,6 @@
         <dt>Setor</dt><dd>${esc(mod.nome)}</dd>
         <dt>Data da retirada</dt><dd>${esc(fmtDataSemana(d.data))}</dd>
         <dt>Horário de retirada</dt><dd>${RETIRADA_TEXTO}</dd>
-        <dt>Quantidade</dt><dd>${fmtQtd(d.quantidade)}</dd>
         <dt>Itens</dt><dd>${d.itens.map(i => `${esc(i.nome)}: ${esc(qtdUn(i.quantidade, i.unidade))}`).join('<br>')}</dd>
       </dl>
       <div class="erro" id="erroConf"></div>
@@ -584,11 +620,11 @@
         // Confere limites e estoque com os dados mais recentes.
         const [mSnap, ...snaps] = await Promise.all([
           getDoc(doc(db, 'modalidades', mod.id)),
-          ...d.itemIds.map(id => getDoc(doc(db, 'itens', id)))
+          ...d.pedidos.map(x => getDoc(doc(db, 'itens', x.id)))
         ]);
         modAtual = { id: mSnap.id, ...mSnap.data() };
         const catalogo = snaps.filter(s => s.exists()).map(s => ({ id: s.id, ...s.data() }));
-        const { erros, itens } = validarSolicitacao(modAtual, d, catalogo, 0);
+        const { erros, itens } = validarSolicitacao(modAtual, d, catalogo);
         if (erros.length) return erro(erros.join('\n'));
         itensMap = {};
         itens.forEach(i => { itensMap[i.id] = { nome: i.nome, unidade: i.unidade, quantidade: i.quantidade }; });
@@ -596,29 +632,36 @@
 
       // Ocupa a próxima posição do dia. Se outra solicitação do setor for gravada ao
       // mesmo tempo, o Firebase recusa uma delas e o sistema tenta a posição seguinte.
+      const quantidadeTotal = somaItens(d.itens);
       for (let tentativa = 0; tentativa < 4; tentativa++) {
-        let n, totalAnterior;
+        let n, totalAnterior, contAnterior;
         try {
           const cSnap = await getDoc(contRef);
-          n = (cSnap.exists() ? cSnap.data().n || 0 : 0) + 1;
-          totalAnterior = cSnap.exists() ? cSnap.data().total || 0 : 0;
+          contAnterior = cSnap.exists() ? cSnap.data() : null;
+          n = (contAnterior ? contAnterior.n || 0 : 0) + 1;
+          totalAnterior = contAnterior ? contAnterior.total || 0 : 0;
         } catch (e) { return erro(msgErro(e)); }
-        const usadosAgora = Math.max(n - 1, dados.solicitacoes.filter(s => dataDe(s) === d.data).length);
+        const usadosAgora = Math.max(n - 1, solsDoSetorNaData(d.data).length);
         if (usadosAgora >= limiteDia(modAtual)) return erro(msgLimiteDiario(modAtual, d.data));
-        // Soma acumulada do setor na data (o Firebase confere a mesma conta).
-        const jaSolicitado = Math.max(totalAnterior, quantidadeNaData(d.data));
-        if (modAtual.limite == null || maior(jaSolicitado + d.quantidade, modAtual.limite))
-          return erro(msgLimiteModalidade(modAtual, jaSolicitado, d.quantidade));
+        // Limite do setor para cada item, somando os pedidos da data (o Firebase confere a mesma conta).
+        if (modAtual.limite == null) return erro(MSG_SEM_LIMITE);
+        const excedidos = d.itens.map(i => {
+          const ja = Math.max(itemNoContador(contAnterior, i.id), quantidadeItemNaData(d.data, i.id));
+          return maior(arred(ja + i.quantidade), modAtual.limite) ? msgLimiteItem(modAtual, i, ja, i.quantidade) : '';
+        }).filter(Boolean);
+        if (excedidos.length) return erro(excedidos.join('\n'));
+        const itensCont = { ...((contAnterior && contAnterior.itens) || {}) };
+        d.itens.forEach(i => { itensCont[i.id] = arred(itemNoContador(contAnterior, i.id) + i.quantidade); });
         const solRef = doc(db, 'solicitacoes', `${mod.id}_${d.data}_${n}`);
         try {
           const lote = writeBatch(db);
-          lote.set(contRef, { setorId: mod.id, data: d.data, n, total: arred(totalAnterior + d.quantidade) });
+          lote.set(contRef, { setorId: mod.id, data: d.data, n, total: arred(totalAnterior + quantidadeTotal), itens: itensCont, legado: legadoDoContador(contAnterior) });
           // A solicitação não mexe no estoque: a baixa é feita no "Fornecido".
           lote.set(solRef, {
             modalidadeId: mod.id,
             data: d.data,
             horarioRetirada: HORARIO_RETIRADA,
-            quantidade: d.quantidade,
+            quantidade: quantidadeTotal,
             itens: itensMap,
             usuarioId: perfil.uid,
             usuarioNome: perfil.nome,
@@ -640,6 +683,116 @@
         }
       }
       erro('Não foi possível registrar: o prazo, o limite diário, o estoque ou os limites foram alterados. Volte e revise a solicitação.');
+    });
+  }
+
+  /* ================= Nova Solicitação do Administrador ================= */
+  // Sem prazo de horário nem calendário (qualquer data, inclusive passada). Fica vinculada
+  // ao setor escolhido, respeita o limite do setor em cada item (nesta solicitação), não
+  // conta nos limites diários do setor e já entra como "Pedido Recebido". Sem baixa no
+  // estoque: a baixa só ocorre no FORNECER.
+  function painelNovaSolicitacao(alvo, valores = {}) {
+    const setores = dados.modalidades;
+    const setorId = valores.setorId || setores[0]?.id || '';
+    const mod = modalidade(setorId);
+    const disponiveis = itensOrdenados().filter(i => i.ativo);
+    const qtd = {}; (valores.itens || []).forEach(i => { qtd[i.id] = i.quantidade; });
+    alvo.innerHTML = `
+      <section class="card nova-sol" id="secNovaSol">
+        <h2>➕ Nova Solicitação <span class="selo-admin">Administrador</span></h2>
+        <p class="muted small" style="margin-top:-.3rem">Sem prazo de horário ou calendário: qualquer data (inclusive passadas) e qualquer hora. A solicitação fica vinculada ao setor escolhido e já entra como <strong>“Pedido Recebido”</strong>. O estoque só baixa quando o pedido for fornecido.</p>
+        ${setores.length ? `<form id="fNovaSol" novalidate>
+          <div class="grade">
+            <label>Setor<select id="novaSetor">${setores.map(m => `<option value="${m.id}" ${m.id === setorId ? 'selected' : ''}>${esc(m.nome)}</option>`).join('')}</select></label>
+            <label>Data da retirada<input type="date" id="novaData" value="${esc(valores.data || hojeISO())}"></label>
+          </div>
+          <div class="aviso" style="font-weight:500">${mod && mod.limite != null
+            ? `Limite do setor ${esc(mod.nome)}: <strong>até ${fmtQtd(mod.limite)} de cada item</strong> nesta solicitação. Solicitações do Administrador <strong>não contam</strong> nos limites diários do setor.`
+            : esc(MSG_SEM_LIMITE)}</div>
+          <h3 style="font-size:1rem;margin-top:.6rem">Itens do pedido</h3>
+          ${disponiveis.length ? `<p class="muted small" style="margin-top:-.3rem">Informe a quantidade de cada item (até ${MAX_ITENS_POR_SOLICITACAO} itens). Deixe em branco os itens que não quiser.</p>
+            ${tabelaItensQuantidade(disponiveis, qtd, i => mod && mod.limite != null ? `máx. ${esc(qtdUn(mod.limite, i.unidade))} (limite do setor)` : '')}`
+            : '<p class="muted">Nenhum item disponível no momento.</p>'}
+          <div class="erro" id="erroNovaSol" style="margin-top:.8rem"></div>
+          <div class="acoes">
+            <button class="btn primario" type="submit">Continuar</button>
+            <button class="btn secundario" type="button" id="btnCancelarNova">Cancelar</button>
+          </div>
+        </form>` : '<p class="muted">Cadastre um setor antes de fazer solicitações.</p>'}
+      </section>`;
+    if (!setores.length) return;
+    const ler = () => ({ setorId: $('novaSetor').value, data: $('novaData').value, ...lerQuantidades($('fNovaSol')) });
+    ligarTabelaQuantidade(alvo);
+    $('novaSetor').onchange = () => { const v = ler(); painelNovaSolicitacao(alvo, { setorId: v.setorId, data: v.data, itens: v.pedidos || [] }); };
+    $('btnCancelarNova').onclick = () => { alvo.innerHTML = ''; alvo.hidden = true; const b = $('btnNovaSol'); if (b) b.classList.remove('ativa-menu'); };
+    $('fNovaSol').onsubmit = e => {
+      e.preventDefault();
+      const erro = msg => { $('erroNovaSol').textContent = msg; };
+      const v = ler();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v.data || '')) return erro('Informe a data da retirada.');
+      if (v.erro) return erro(v.erro);
+      const m = modalidade(v.setorId);
+      if (!m) return erro('Escolha o setor.');
+      const { erros, itens } = validarSolicitacao(m, { data: v.data, pedidos: v.pedidos }, dados.itens, undefined, true);
+      if (erros.length) return erro(erros.join('\n'));
+      resumoNovaSolicitacao(alvo, m, { setorId: m.id, data: v.data, pedidos: v.pedidos, itens });
+    };
+  }
+
+  function resumoNovaSolicitacao(alvo, m, d) {
+    alvo.innerHTML = `
+      <section class="card nova-sol" id="secNovaSol">
+        <h2>Confirme a solicitação</h2>
+        <dl class="resumo">
+          <dt>Setor</dt><dd>${esc(m.nome)}</dd>
+          <dt>Data da retirada</dt><dd>${esc(fmtDataSemana(d.data))}</dd>
+          <dt>Retirada</dt><dd>${RETIRADA_TEXTO}</dd>
+          <dt>Itens</dt><dd>${d.itens.map(i => `${esc(i.nome)}: ${esc(qtdUn(i.quantidade, i.unidade))}`).join('<br>')}</dd>
+          <dt>Status</dt><dd><span class="status recebido">◐ Pedido Recebido</span></dd>
+          <dt>Criada por</dt><dd>${esc(perfil.nome)} <span class="selo-admin">Administrador</span></dd>
+        </dl>
+        <p class="muted small">O estoque não é alterado agora: a baixa ocorre somente no FORNECER.</p>
+        <div class="erro" id="erroConfNova"></div>
+        <div class="acoes">
+          <button class="btn primario" id="btnConfirmarNova">Confirmar Solicitação</button>
+          <button class="btn secundario" id="btnVoltarNova">Voltar</button>
+        </div>
+      </section>`;
+    $('btnVoltarNova').onclick = () => painelNovaSolicitacao(alvo, d);
+    $('btnConfirmarNova').onclick = () => comBotao($('btnConfirmarNova'), async () => {
+      const erro = msg => { $('erroConfNova').textContent = msg; };
+      try {
+        // Confere o limite do setor e o estoque com os dados mais recentes.
+        const [mSnap, ...snaps] = await Promise.all([
+          getDoc(doc(db, 'modalidades', m.id)),
+          ...d.pedidos.map(x => getDoc(doc(db, 'itens', x.id)))
+        ]);
+        if (!mSnap.exists()) return erro('O setor escolhido não existe mais.');
+        const mAtual = { id: mSnap.id, ...mSnap.data() };
+        const catalogo = snaps.filter(s => s.exists()).map(s => ({ id: s.id, ...s.data() }));
+        const { erros, itens } = validarSolicitacao(mAtual, d, catalogo, undefined, true);
+        if (erros.length) return erro(erros.join('\n'));
+        const itensMap = {};
+        itens.forEach(i => { itensMap[i.id] = { nome: i.nome, unidade: i.unidade, quantidade: i.quantidade }; });
+        const solRef = doc(db, 'solicitacoes', `${m.id}_${d.data}_adm${Date.now()}`);
+        await setDoc(solRef, {
+          modalidadeId: m.id,
+          data: d.data,
+          horarioRetirada: HORARIO_RETIRADA,
+          quantidade: somaItens(itens),
+          itens: itensMap,
+          usuarioId: perfil.uid,
+          usuarioNome: perfil.nome,
+          status: 'recebido',
+          criadoPorAdmin: true,
+          recebidoEm: serverTimestamp(),
+          recebidoPorUid: perfil.uid,
+          recebidoPorNome: perfil.nome,
+          baixaNoFornecimento: true,
+          criadoEm: serverTimestamp()
+        });
+        ctxSol.recarregar(`Solicitação registrada para ${m.nome} em ${fmtData(d.data)} como "Pedido Recebido".`);
+      } catch (e) { erro('Não foi possível registrar: ' + msgErro(e)); }
     });
   }
 
@@ -1542,6 +1695,8 @@
       }));
 
       p.innerHTML = `
+      ${paioleiro ? '' : `<div class="acoes" style="margin:0 0 1rem"><button class="btn primario" id="btnNovaSol">➕ Nova Solicitação</button></div>
+      <div id="areaNovaSol" hidden></div>`}
       <div class="indicadores">
         ${paioleiro
           ? indicador('Pedidos a fornecer', rec, true) + indicador('Pedidos fornecidos', forn)
@@ -1582,7 +1737,7 @@
               <div class="grupo-itens">Itens a preparar: ${itensAPreparar(lista)}</div>
             </td></tr>
             ${lista.map(s => `<tr class="${classeLinha(s)}" data-grupo-de="${dt}" ${fechado(dt) ? 'hidden' : ''}>
-              <td>${!paioleiro && grupoDe(s) === 'fornecidos' ? `<input type="checkbox" class="caixa" data-sel-sol="${s.id}" aria-label="Selecionar para excluir do histórico" style="margin-right:.35rem">` : ''}<strong>${esc(nomeSetor(s.modalidadeId))}</strong></td>
+              <td>${!paioleiro && grupoDe(s) === 'fornecidos' ? `<input type="checkbox" class="caixa" data-sel-sol="${s.id}" aria-label="Selecionar para excluir do histórico" style="margin-right:.35rem">` : ''}<strong>${esc(nomeSetor(s.modalidadeId))}</strong>${criadaPeloAdmin(s) ? ' <span class="selo-admin">Criada pelo Administrador</span>' : ''}</td>
               <td class="num">${fmtQtd(s.quantidade)}</td>
               <td>${listaItensHtml(s)}</td>
               <td>${esc(s.usuarioNome || '—')}</td>
@@ -1622,6 +1777,11 @@
         b.title = (fechar ? 'Expandir' : 'Minimizar') + ' as solicitações desta data';
         b.textContent = fechar ? '▼ Expandir' : '▲ Minimizar';
       });
+      if (!paioleiro) $('btnNovaSol').onclick = () => {
+        const area = $('areaNovaSol'); area.hidden = !area.hidden;
+        $('btnNovaSol').classList.toggle('ativa-menu', !area.hidden);
+        if (area.hidden) area.innerHTML = ''; else { painelNovaSolicitacao(area); area.scrollIntoView?.({ behavior: 'smooth', block: 'start' }); }
+      };
       $('selData').onchange = () => { filtroData = $('selData').value; PAINEIS.solicitacoes(p); };
       $('btnHoje').onclick = () => { filtroData = hoje; PAINEIS.solicitacoes(p); };
 
@@ -2037,7 +2197,7 @@
     modalidades(p) {
       p.innerHTML = `<section class="card">
         <h2>Setores e limites</h2>
-        <p class="muted small" style="margin-top:-.3rem"><strong>Limite de quantidade por dia</strong>: soma máxima das quantidades de todos os pedidos do setor na mesma data (aceita decimais).
+        <p class="muted small" style="margin-top:-.3rem"><strong>Limite de quantidade por dia</strong>: quantidade máxima <strong>de cada item</strong> que o setor pode pedir na mesma data, somando os pedidos do dia (ex.: 20 → até 20 L de água, 20 kg de café...; aceita decimais). Também é o máximo de cada item numa solicitação feita pelo Administrador, que não conta nos limites diários.
           <strong>Limite de pedidos por dia</strong>: quantas solicitações o setor pode registrar na mesma data (padrão: 1). Os dois limites valem ao mesmo tempo e a contagem recomeça a cada data.</p>
         <form id="fMod" novalidate>
           <div class="tabela-wrap"><table>

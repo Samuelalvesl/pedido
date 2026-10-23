@@ -293,13 +293,6 @@ img{max-width:100%}
 
   .lista-itens li{white-space:normal}
   .itens-sol td input{max-width:none;width:130px}
-  /* Lista de itens para marcar (solicitação): linhas compactas, fáceis de tocar */
-  #fSol .tabela-wrap tbody tr{display:flex;align-items:center;gap:.7rem;padding:.55rem .75rem;margin-bottom:.4rem}
-  #fSol .tabela-wrap tbody td{border:none;padding:0;width:auto;font-size:1rem;font-weight:400}
-  #fSol .tabela-wrap tbody td::before{display:none}
-  #fSol .tabela-wrap tbody td:nth-child(2){flex:1;text-align:left}
-  #fSol .tabela-wrap tbody td:last-child{color:var(--texto-suave)}
-  #fSol .tabela-wrap tbody tr:has(input:checked){border-color:var(--azul-700);background:var(--azul-50)}
   .barra-lote{position:sticky;bottom:8px;z-index:20;box-shadow:var(--sombra)}
   .barra-lote .btn{width:100%}
 }
@@ -390,3 +383,19 @@ img{max-width:100%}
 tr.grupo-data.recolhido td{opacity:.92}
 .tabela-wrap tr[hidden]{display:none !important}
 @media (pointer:coarse){.btn-grupo{min-height:40px;padding:.35rem .9rem}}
+
+/* ===== Itens do pedido: ITEM → UNIDADE → QUANTIDADE ===== */
+.tabela-qtd td input{max-width:130px;margin:0 0 0 auto;text-align:right}
+.tabela-qtd tr.marcado td{background:var(--azul-50)}
+.tabela-qtd .dica-item{font-weight:400;margin-top:.1rem}
+.selo-admin{display:inline-block;background:var(--azul-900);color:#fff;border-radius:99px;padding:.1rem .55rem;font-size:.72rem;font-weight:700;margin-left:.3rem;vertical-align:middle;white-space:nowrap}
+.card.nova-sol{border-top-width:5px}
+@media (max-width:1099px){
+  .tabela-wrap .tabela-qtd tbody tr{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:.2rem .7rem;padding:.6rem .75rem;margin-bottom:.45rem}
+  .tabela-wrap .tabela-qtd tbody tr.marcado{background:var(--azul-50);border-color:var(--azul-700)}
+  .tabela-wrap .tabela-qtd tbody td{border:none;padding:0;text-align:left;display:block;grid-column:auto;margin:0}
+  .tabela-wrap .tabela-qtd tbody td::before{display:none}
+  .tabela-wrap .tabela-qtd tbody tr > td:first-child{display:block;font-size:1rem;border:none;padding:0;margin:0;grid-column:auto}
+  .tabela-wrap .tabela-qtd tbody td:nth-child(2){color:var(--texto-suave);font-weight:600}
+  .tabela-wrap .tabela-qtd td input{width:100px;max-width:100px}
+}
