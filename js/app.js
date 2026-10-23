@@ -984,6 +984,22 @@
     return [...m.values()].sort((a, b) => ordemNatural(a.nome, b.nome));
   }
 
+  // Campo PAIOLEIRO do vale: só quem forneceu como Paioleiro. Fornecimentos marcados
+  // por um Administrador não colocam o nome dele nesse campo.
+  const perfisFornecedores = new Map();       // uid -> { perfil, nome }
+  async function conhecerFornecedores() {
+    if (perfil) perfisFornecedores.set(perfil.uid, { perfil: perfil.perfil, nome: perfil.nome });
+    (dados.usuarios || []).forEach(u => perfisFornecedores.set(u.id, { perfil: u.perfil, nome: u.nome }));
+    const uids = [...new Set((dados.solicitacoes || []).map(s => s.fornecidoPorUid).filter(Boolean))].filter(u => !perfisFornecedores.has(u));
+    await Promise.all(uids.map(async uid => {
+      try { const sn = await getDoc(doc(db, 'usuarios', uid)); perfisFornecedores.set(uid, sn.exists() ? { perfil: sn.data().perfil, nome: sn.data().nome } : { perfil: '' }); }
+      catch (e) { perfisFornecedores.set(uid, { perfil: '' }); }   // sem acesso: não é Administrador
+    }));
+  }
+  const fornecedorEhAdmin = uid => (perfisFornecedores.get(uid) || {}).perfil === 'admin';
+  const nomeEhDeAdmin = nome => [...perfisFornecedores.values()].some(p => p.perfil === 'admin' && p.nome === nome);
+  const somentePaioleiros = nomes => (nomes || []).filter(n => !nomeEhDeAdmin(n));
+
   // Monta o vale de UM item (sem gravar nada): uma linha por setor.
   function montarVale(dt, itemId, setorId, complementares) {
     const porSetor = new Map(), vistos = new Set(), paioleiros = new Set();
@@ -994,7 +1010,7 @@
       const chave = `${s.id}|${i.id}`;              // impede duplicar o mesmo fornecimento
       if (vistos.has(chave)) continue; vistos.add(chave);
       unidade = i.unidade; nomeItem = i.nome;
-      if (s.fornecidoPorNome) paioleiros.add(s.fornecidoPorNome);
+      if (s.fornecidoPorNome && !fornecedorEhAdmin(s.fornecidoPorUid)) paioleiros.add(s.fornecidoPorNome);
       const setor = nomeSetor(s.modalidadeId);
       const l = porSetor.get(s.modalidadeId) || { setor, uf: i.unidade, qtdSol: 0, qtdForn: 0, reduzido: false, solicitacoes: [] };
       const forn = qtdFornecida(s, i);
@@ -1130,7 +1146,8 @@
         desenharAssinatura(pdf, assinaturas.fiel, VALE_RODAPE[2] + 2.5, 630.6, VALE_RODAPE[3] - VALE_RODAPE[2] - 5, 30.0);
         desenharAssinatura(pdf, assinaturas.autorizado, VALE_RODAPE[3] + 2.5, 631.2, VALE_RODAPE[4] - VALE_RODAPE[3] - 5, 29.4);
         T('PAIOLEIRO:', rc(4), 666.4, 5.25, 'normal', 'center');
-        if (v.paioleiros.length) T(v.paioleiros.join(', '), rc(4), 674.5, 5.25, 'normal', 'center', VALE_RODAPE[5] - VALE_RODAPE[4] - 4);
+        const paiol = somentePaioleiros(v.paioleiros);
+        if (paiol.length) T(paiol.join(', '), rc(4), 674.5, 5.25, 'normal', 'center', VALE_RODAPE[5] - VALE_RODAPE[4] - 4);
         T('POSTO/GRAD/NOME', rc(5), 666.4, 5.25, 'normal', 'center');
       }
     }
@@ -1154,7 +1171,7 @@
   }
 
   async function baixarValePDF(vales) {
-    const [JsPDF, assinaturas] = await Promise.all([carregarJsPDF(), carregarAssinaturas()]);
+    const [JsPDF, assinaturas] = await Promise.all([carregarJsPDF(), carregarAssinaturas(), conhecerFornecedores()]);
     const pdf = desenharValePDF(JsPDF, vales, assinaturas);
     const nome = vales.length === 1 ? vales[0].itemNome.replace(/[^\wÀ-ÿ-]+/g, '_') : 'todos_os_itens';
     pdf.save(`Vale_Generos_CN-42_${fmtData(vales[0].data).replace(/\//g, '-')}_${nome}.pdf`);
@@ -1229,7 +1246,7 @@
         try { await baixarValePDF([x]); } catch (e) { erro(e.message || msgErro(e)); }
       }));
     };
-    desenhar(alvo.dataset.valeData || hoje, '', '', '');
+    conhecerFornecedores().finally(() => desenhar(alvo.dataset.valeData || hoje, '', '', ''));
   }
 
   /* ================= Assinaturas do Vale (imagens) ================= */
