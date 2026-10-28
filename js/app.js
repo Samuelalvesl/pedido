@@ -69,6 +69,8 @@
   let filtroSolicitacoes = 'todas';
   const gruposRecolhidos = new Set();   // datas minimizadas na lista de solicitações do Administrador
   let filtroData = 'todas';
+  // Tela Solicitações (Administrador e Paioleiro): calendário de retiradas ou lista por data.
+  let modoSol = 'calendario', diaSol = null, mesSol = null;
   const filtroHistorico = { tipo: '', de: '', ate: '', admin: '' }; // filtros do Histórico de Exclusões   // data da retirada selecionada no painel de solicitações
   // Quem está usando o painel de solicitações (Administrador ou Paioleiro).
   const CTX_ADMIN = { papel: 'admin', recarregar: msg => telaAdmin('solicitacoes', msg, true) };
@@ -260,6 +262,7 @@
     dataSelecionada = null;
     filtroData = 'todas';
     gruposRecolhidos.clear();
+    modoSol = 'calendario'; diaSol = null; mesSol = null;
     await signOut(auth);
   }
 
@@ -1658,8 +1661,15 @@
         return fx ? x.localeCompare(y) : y.localeCompare(x);
       };
       const datas = [...new Set(todas.map(dataDe))].sort(ordemDatas);
+      const noCalendario = modoSol === 'calendario';
+      if (noCalendario) {
+        // A data de retirada é gravada como texto "AAAA-MM-DD" (sem horário), então não muda
+        // de dia com o fuso; o "hoje" é calculado pelo horário de Brasília (UTC−3).
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(diaSol || '')) diaSol = hoje;
+        if (!mesSol) mesSol = { ano: +diaSol.slice(0, 4), mes: +diaSol.slice(5, 7) };
+      }
       if (filtroData && filtroData !== 'todas' && !datas.includes(filtroData) && filtroData !== hoje) filtroData = 'todas';
-      const naData = filtroData && filtroData !== 'todas' ? todas.filter(s => dataDe(s) === filtroData) : todas;
+      const naData = !noCalendario && filtroData && filtroData !== 'todas' ? todas.filter(s => dataDe(s) === filtroData) : todas;
       const pend = grupo('pendentes', naData), rec = grupo('recebidos', naData), forn = grupo('fornecidos', naData);
       const visiveis = filtroSolicitacoes === 'todas' ? naData : grupo(filtroSolicitacoes, naData);
       const indicador = (rotulo, l, destaque) => `<div class="indicador ${destaque ? 'destaque' : ''}">
@@ -1694,6 +1704,78 @@
         dt, lista: visiveis.filter(s => dataDe(s) === dt).sort((x, y) => (modalidade(x.modalidadeId)?.nome || '').localeCompare(modalidade(y.modalidadeId)?.nome || ''))
       }));
 
+      // ---- Calendário de retiradas ----
+      const caixaExclusao = s => !paioleiro && grupoDe(s) === 'fornecidos' ? `<input type="checkbox" class="caixa" data-sel-sol="${s.id}" aria-label="Selecionar para excluir do histórico" style="margin-right:.35rem">` : '';
+      const numeroPedido = s => {
+        if (criadaPeloAdmin(s)) return 'ADM';
+        const m = String(s.id).match(/_\d{4}-\d{2}-\d{2}_(\d+)$/);
+        return m ? `Nº ${m[1]}` : '—';
+      };
+      const temAcaoPendente = s => paioleiro ? statusDe(s) === 'recebido' : statusDe(s) === 'pendente';
+      function htmlCalendario() {
+        const { ano, mes } = mesSol;
+        const porDia = {};
+        todas.forEach(s => { const dt = dataDe(s); if (dt) (porDia[dt] = porDia[dt] || []).push(s); });
+        const ini = new Date(Date.UTC(ano, mes - 1, 1)).getUTCDay(), dias = new Date(Date.UTC(ano, mes, 0)).getUTCDate();
+        let cel = '';
+        for (let i = 0; i < ini; i++) cel += '<div class="cs-dia vazio"></div>';
+        for (let d = 1; d <= dias; d++) {
+          const dt = isoData(ano, mes, d), l = porDia[dt] || [], aguarda = l.some(temAcaoPendente);
+          const titulo = `${fmtDataSemana(dt)}: ${l.length ? plural(l.length, 'pedido', 'pedidos') : 'sem pedidos'}${aguarda ? (paioleiro ? ' · há pedidos a fornecer' : ' · há pedidos pendentes') : ''}`;
+          cel += `<button type="button" class="cs-dia${l.length ? ' com' : ''}${dt === hoje ? ' hoje' : ''}${dt === diaSol ? ' sel' : ''}" data-dia-sol="${dt}" title="${esc(titulo)}" aria-label="${esc(titulo)}" aria-pressed="${dt === diaSol}">
+            <span>${d}</span>${l.length ? `<span class="cs-n">${l.length}</span>` : ''}${aguarda ? '<span class="cs-pend"></span>' : ''}</button>`;
+        }
+        const mesCurto = !!(window.matchMedia && window.matchMedia('(max-width: 480px)').matches);
+        const anos = [...new Set([...datas.map(dt => +dt.slice(0, 4)).filter(Boolean), +hoje.slice(0, 4) - 1, +hoje.slice(0, 4), +hoje.slice(0, 4) + 1, ano])].sort((a, b) => a - b);
+        const anoMin = anos[0], anoMax = anos[anos.length - 1];
+        return `<div class="cs-cal">
+          <div class="cs-topo">
+            <button type="button" class="btn secundario pequeno" id="csAnt" aria-label="Mês anterior">‹</button>
+            <select id="csMes" aria-label="Mês">${NOMES_MESES.map((n, i) => `<option value="${i + 1}" ${i + 1 === mes ? 'selected' : ''}>${mesCurto ? n.slice(0, 3) : n}</option>`).join('')}</select>
+            <select id="csAno" aria-label="Ano">${Array.from({ length: anoMax - anoMin + 1 }, (_, k) => anoMin + k).map(a => `<option ${a === ano ? 'selected' : ''}>${a}</option>`).join('')}</select>
+            <button type="button" class="btn secundario pequeno" id="csProx" aria-label="Próximo mês">›</button>
+            <button type="button" class="btn secundario pequeno" id="csHoje">Hoje</button>
+          </div>
+          <div class="cs-sem">${['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map(x => `<span>${x}</span>`).join('')}</div>
+          <div class="cs-grade">${cel}</div>
+          <div class="cs-leg"><span><i class="com"></i>Com pedidos</span><span><i class="sel"></i>Selecionado</span><span><i></i>Sem pedidos</span><span><i class="pend"></i>${paioleiro ? 'A fornecer' : 'Pendente de recebimento'}</span></div>
+          <button type="button" class="btn secundario pequeno cs-lista" id="btnModoLista">Ver todas as datas em lista</button>
+        </div>`;
+      }
+      function htmlDoDia() {
+        const doDia = todas.filter(s => dataDe(s) === diaSol);
+        const lista = visiveis.filter(s => dataDe(s) === diaSol).sort((x, y) => (modalidade(x.modalidadeId)?.nome || '').localeCompare(modalidade(y.modalidadeId)?.nome || ''));
+        const cab = `<div class="cs-cab"><strong>📅 ${esc(fmtDataSemana(diaSol))}</strong>${diaSol === hoje ? ' <span class="status recebido">hoje</span>' : ''}
+          ${doDia.length ? `<span class="grupo-info">Retirada ${RETIRADA_TEXTO} · ${plural(doDia.length, 'pedido', 'pedidos')}${lista.length !== doDia.length ? ` · ${lista.length} neste filtro` : ''}</span>
+          <div class="grupo-itens">Itens a preparar: ${itensAPreparar(doDia)}</div>` : ''}</div>`;
+        if (!doDia.length) {
+          const prox = datas.filter(dt => dt > diaSol).sort()[0], ant = datas.filter(dt => dt < diaSol).sort().pop();
+          const ir = prox || ant;
+          return cab + `<div class="cs-vazio"><strong>Não há pedidos para esta data.</strong>${ir ? `<div class="small" style="margin-top:.4rem">${prox ? 'Próxima' : 'Última'} data com pedidos: <button type="button" class="cs-link" data-ir-dia="${ir}">${esc(fmtData(ir))} ${prox ? '→' : '←'}</button></div>` : ''}</div>`;
+        }
+        if (!lista.length) return cab + '<div class="cs-vazio">Nenhum pedido desta data neste filtro.</div>';
+        return cab + `<div class="tabela-wrap"><table class="tabela-dia">
+          <thead><tr><th>Pedido</th><th>Setor</th><th>Itens</th><th>Status e ações</th></tr></thead>
+          <tbody>${lista.map(s => `<tr class="${classeLinha(s)}">
+            <td>${caixaExclusao(s)}<span class="cs-num">${numeroPedido(s)}</span><div class="small muted">Retirada ${esc(fmtData(dataDe(s)))} · ${esc(textoRetirada(s))}</div></td>
+            <td><strong>${esc(nomeSetor(s.modalidadeId))}</strong>${criadaPeloAdmin(s) ? ' <span class="selo-admin">Criada pelo Administrador</span>' : ''}<div class="small muted">${esc(s.usuarioNome || '—')} · ${fmtDataHora(s.criadoEm)}</div></td>
+            <td>${listaItensHtml(s)}</td>
+            <td>${seloStatus(s)}${historicoStatus(s)}${acoes(s)}</td>
+          </tr>${temAlteracoes(s) ? `<tr class="linha-registro"><td colspan="4">
+            <div class="registro-titulo">Registro de Alterações na Quantidade</div>
+            ${tabelaRegistro(s.alteracoes, s.fornecidoPorNome, fmtDataHora(s.fornecidoEm))}
+          </td></tr>` : ''}`).join('')}</tbody></table></div>`;
+      }
+      const filtrosHtml = `<div class="filtros">
+          ${(paioleiro
+            ? [['recebidos', 'A fornecer'], ['fornecidos', 'Fornecidos'], ['todas', 'Todas']]
+            : [['todas', 'Todas'], ['pendentes', 'Pendentes'], ['recebidos', 'Pedido Recebido'], ['fornecidos', 'Fornecidos']]).map(([k, t]) =>
+            `<button data-filtro="${k}" class="${filtroSolicitacoes === k ? 'ativo' : ''}">${t}</button>`).join('')}
+        </div>
+        <div class="erro" id="erroAtend"></div>
+        ${paioleiro ? '' : `<div class="barra-lote" id="barraSol" hidden><span id="qtdSol"></span>
+          <button class="btn perigo-cheio pequeno" id="btnExcluirSol">Excluir histórico</button></div>`}`;
+
       p.innerHTML = `
       ${paioleiro ? '' : `<div class="acoes" style="margin:0 0 1rem"><button class="btn primario" id="btnNovaSol">➕ Nova Solicitação</button></div>
       <div id="areaNovaSol" hidden></div>`}
@@ -1702,8 +1784,13 @@
           ? indicador('Pedidos a fornecer', rec, true) + indicador('Pedidos fornecidos', forn)
           : indicador('Pedidos pendentes', pend, true) + indicador('Pedidos recebidos', rec) + indicador('Pedidos fornecidos', forn) + indicador('Total de pedidos', naData)}
       </div>
-      <section class="card">
+      ${noCalendario ? `<section class="card">
+        <h2>${paioleiro ? 'Solicitações autorizadas' : 'Solicitações'}</h2>
+        <p class="muted small" style="margin-top:-.3rem">Escolha um dia no calendário para ver os pedidos com retirada nessa data. Os dias em azul têm pedidos (o número mostra quantos). ${paioleiro ? 'Ao entregar, clique em "FORNECER" e confirme: a baixa no estoque é feita nesse momento.' : 'Fluxo: Pendente → Pedido Recebido → Fornecido; a baixa no estoque ocorre somente no "Fornecido".'}</p>
+        <div class="cs-layout">${htmlCalendario()}<div class="cs-lista-dia">${filtrosHtml}${htmlDoDia()}</div></div>
+      </section>` : `<section class="card">
         <h2>${paioleiro ? 'Solicitações autorizadas' : 'Solicitações por data'}</h2>
+        <div class="acoes" style="margin:-.2rem 0 .6rem"><button type="button" class="btn secundario pequeno" id="btnModoCal">📅 Ver no calendário</button></div>
         <p class="muted small" style="margin-top:-.3rem">${paioleiro
           ? 'Aqui aparecem as solicitações autorizadas pelo Administrador ("Pedido Recebido"). Ao entregar o pedido, clique em "FORNECER" e confirme: a baixa no estoque é feita nesse momento e o status passa para "Fornecido".'
           : 'Fluxo: Pendente → Pedido Recebido → Fornecido. A baixa no estoque ocorre somente no "Fornecido".'} Retirada sempre das ${RETIRADA_TEXTO}.</p>
@@ -1719,15 +1806,7 @@
           </label>
           <button type="button" class="btn secundario pequeno" id="btnHoje">Hoje</button>
         </div>
-        <div class="filtros">
-          ${(paioleiro
-            ? [['recebidos', 'A fornecer'], ['fornecidos', 'Fornecidos'], ['todas', 'Todas']]
-            : [['todas', 'Todas'], ['pendentes', 'Pendentes'], ['recebidos', 'Pedido Recebido'], ['fornecidos', 'Fornecidos']]).map(([k, t]) =>
-            `<button data-filtro="${k}" class="${filtroSolicitacoes === k ? 'ativo' : ''}">${t}</button>`).join('')}
-        </div>
-        <div class="erro" id="erroAtend"></div>
-        ${paioleiro ? '' : `<div class="barra-lote" id="barraSol" hidden><span id="qtdSol"></span>
-          <button class="btn perigo-cheio pequeno" id="btnExcluirSol">Excluir histórico</button></div>`}
+        ${filtrosHtml}
         ${porData.length ? `<div class="tabela-wrap"><table>
           <thead><tr><th>Setor</th><th class="num">Quantidade</th><th>Itens</th><th>Responsável</th><th>Registrada em</th><th>Status</th></tr></thead>
           <tbody>${porData.map(({ dt, lista }) => `
@@ -1747,7 +1826,23 @@
               <div class="registro-titulo">Registro de Alterações na Quantidade</div>
               ${tabelaRegistro(s.alteracoes, s.fornecidoPorNome, fmtDataHora(s.fornecidoEm))}
             </td></tr>` : ''}`).join('')}`).join('')}</tbody></table></div>` : '<p class="muted">Nenhuma solicitação neste filtro.</p>'}
-      </section>`;
+      </section>`}`;
+
+      // ---- Navegação do calendário (sem consultar o Firebase de novo) ----
+      const redesenhar = () => PAINEIS.solicitacoes(p);
+      const irPara = dt => { diaSol = dt; mesSol = { ano: +dt.slice(0, 4), mes: +dt.slice(5, 7) }; redesenhar(); };
+      if (noCalendario) {
+        p.querySelectorAll('[data-dia-sol]').forEach(b => b.onclick = () => { diaSol = b.dataset.diaSol; redesenhar(); });
+        p.querySelectorAll('[data-ir-dia]').forEach(b => b.onclick = () => irPara(b.dataset.irDia));
+        $('csAnt').onclick = () => { mesSol = mesSol.mes === 1 ? { ano: mesSol.ano - 1, mes: 12 } : { ano: mesSol.ano, mes: mesSol.mes - 1 }; redesenhar(); };
+        $('csProx').onclick = () => { mesSol = mesSol.mes === 12 ? { ano: mesSol.ano + 1, mes: 1 } : { ano: mesSol.ano, mes: mesSol.mes + 1 }; redesenhar(); };
+        $('csMes').onchange = () => { mesSol = { ano: mesSol.ano, mes: +$('csMes').value }; redesenhar(); };
+        $('csAno').onchange = () => { mesSol = { ano: +$('csAno').value, mes: mesSol.mes }; redesenhar(); };
+        $('csHoje').onclick = () => irPara(hoje);
+        $('btnModoLista').onclick = () => { modoSol = 'lista'; redesenhar(); };
+      } else {
+        $('btnModoCal').onclick = () => { modoSol = 'calendario'; if (filtroData && filtroData !== 'todas') { diaSol = filtroData; mesSol = null; } redesenhar(); };
+      }
 
       const erro = msg => { $('erroAtend').textContent = msg; };
       const resumoTexto = s =>
@@ -1782,8 +1877,10 @@
         $('btnNovaSol').classList.toggle('ativa-menu', !area.hidden);
         if (area.hidden) area.innerHTML = ''; else { painelNovaSolicitacao(area); area.scrollIntoView?.({ behavior: 'smooth', block: 'start' }); }
       };
-      $('selData').onchange = () => { filtroData = $('selData').value; PAINEIS.solicitacoes(p); };
-      $('btnHoje').onclick = () => { filtroData = hoje; PAINEIS.solicitacoes(p); };
+      if ($('selData')) {
+        $('selData').onchange = () => { filtroData = $('selData').value; PAINEIS.solicitacoes(p); };
+        $('btnHoje').onclick = () => { filtroData = hoje; PAINEIS.solicitacoes(p); };
+      }
 
       p.querySelectorAll('[data-filtro]').forEach(b => b.onclick = () => { filtroSolicitacoes = b.dataset.filtro; PAINEIS.solicitacoes(p); });
 

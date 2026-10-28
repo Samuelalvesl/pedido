@@ -1,9 +1,36 @@
 rules_version = '2';
 
-// Regras de segurança do Catanho.
+// Regras de segurança do sistema PEDIDO.
 // Cole este conteúdo em: Console do Firebase > Firestore > aba "Regras" > Publicar.
 //
-// Todas as quantidades (catanhos e estoque) são números inteiros.
+// Quantidades e estoque aceitam números inteiros ou decimais (gravados como número).
+// TOL é a tolerância de arredondamento usada nas comparações com frações.
+//
+// Limites diários por setor (definidos pelo Administrador): "limiteDiario" = número de
+// solicitações por data (padrão 1) e "limite" = soma máxima das quantidades na data. A contagem fica em contadores/{setor}_{data}; cada solicitação
+// ocupa a posição seguinte (id {setor}_{data}_{n}), o que impede ultrapassar o limite
+// mesmo com solicitações simultâneas.
+//
+// Solicitações por data (calendário): até as 9h30 (horário de Brasília, GMT-3) do
+// próprio dia da retirada. Retirada fixa: 10h às 11h.
+//
+// No "Fornecido", o Paioleiro (ou o Administrador) pode manter ou reduzir a quantidade
+// de cada item, nunca aumentar. A baixa no estoque usa a quantidade fornecida, a
+// quantidade aprovada (campo "itens") nunca é alterada, e cada redução fica no
+// "Registro de Alterações na Quantidade" (campo "alteracoes"), que não pode ser
+// alterado nem apagado depois.
+//
+// Vale Extraordinário de Gêneros (CN-42): um vale por item e data, gerado pelo Paioleiro
+// ou Administrador, sem numeração e sem valores; não altera estoque nem solicitações.
+//
+// Administradores: cadastrados e excluídos somente por administradores (seção
+// "Administradores"); ninguém exclui a própria conta, então sempre resta ao menos um.
+//
+// Exclusões (somente o Administrador): setores, itens sem saldo, administradores, responsáveis e
+// paioleiros (o cadastro em "usuarios" é apagado, o que bloqueia todo o acesso), sempre
+// registradas no Histórico de Exclusões ("exclusoes"). O Administrador também pode apagar
+// históricos (exclusões, movimentações e solicitações concluídas); cada uma dessas ações
+// fica no registro administrativo "auditoria", que não pode ser apagado.
 //
 // Fluxo da solicitação:
 //   pendente  ->  recebido ("Pedido Recebido")  ->  fornecido ("Fornecido" + baixa no estoque)
@@ -30,14 +57,12 @@ service cloud.firestore {
     function ehResponsavel() {
       return temPerfil() && meuPerfil().perfil == 'responsavel';
     }
-    function ehCatanheiro() {
-      return temPerfil() && meuPerfil().perfil == 'catanheiro';
+    // Paioleiro (o valor antigo "catanheiro" continua aceito para acessos já criados).
+    function ehPaioleiro() {
+      return temPerfil() && meuPerfil().perfil in ['paioleiro', 'catanheiro'];
     }
     function minhaModalidade() {
       return meuPerfil().modalidadeId;
-    }
-    function horaValida(h) {
-      return h is string && h.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$');
     }
     function caminhoItem(k) {
       return /databases/$(database)/documents/itens/$(k);
@@ -48,59 +73,109 @@ service cloud.firestore {
 
     // ================= Criação da solicitação (responsável) =================
     // Uma solicitação só é aceita se:
-    // - for da modalidade do responsável e de um evento dessa modalidade;
-    // - for a única solicitação da modalidade para o evento (id "modalidade_evento");
-    // - tiver horário de retirada e quantidade de catanhos dentro do limite;
+    // - for da modalidade do responsável;
+    // - for a única solicitação da modalidade para a data (id "modalidade_AAAA-MM-DD");
+    // - for enviada antes das 9h30 (Brasília) do dia da retirada — o que também
+    //   impede datas passadas; o horário usado é o do servidor (request.time);
+    // - tiver o horário de retirada fixo (10:00 às 11:00);
+    // - tiver quantidade de pedidos dentro do limite da modalidade;
     // - tiver de 1 a 6 itens, todos ativos e com saldo suficiente no momento do pedido;
-    //   a quantidade de cada item é igual à quantidade de catanhos pedida.
+    //   cada item tem a sua quantidade, que não pode passar do limite do setor
+    //   (o acumulado do dia, por item, é conferido no contador).
     // O responsável NÃO altera o estoque: a baixa é feita no "Fornecido".
-    function itemNaPosicao(d, ks, i) {
-      return ks.size() <= i || itemDaSolicitacaoValido(d, ks[i]);
+    function itemNaPosicao(d, ks, i, limite) {
+      return ks.size() <= i || itemDaSolicitacaoValido(d, ks[i], limite);
     }
-    function itemDaSolicitacaoValido(d, k) {
+    function TOL() {
+      return 0.0005;
+    }
+    function itemDaSolicitacaoValido(d, k, limite) {
       let q = d.itens[k].quantidade;
       let atual = get(caminhoItem(k)).data;
-      return q is int
-        && q >= 1
+      return q is number
+        && q > 0
         && d.itens[k].keys().hasOnly(['nome', 'unidade', 'quantidade'])
         && atual.ativo == true
-        && q == d.quantidade
-        && q <= atual.saldo;
+        && limite is number
+        && q <= limite + TOL()
+        && q <= atual.saldo + TOL();
+    }
+    function itensDaSolicitacaoValidos(d, ks, limite) {
+      return d.itens is map
+        && ks.size() >= 1
+        && ks.size() <= 6
+        && itemNaPosicao(d, ks, 0, limite)
+        && itemNaPosicao(d, ks, 1, limite)
+        && itemNaPosicao(d, ks, 2, limite)
+        && itemNaPosicao(d, ks, 3, limite)
+        && itemNaPosicao(d, ks, 4, limite)
+        && itemNaPosicao(d, ks, 5, limite);
+    }
+    function caminhoContador(id) {
+      return /databases/$(database)/documents/contadores/$(id);
+    }
+    // Fim do prazo da data "AAAA-MM-DD": 9h30 de Brasília = 12h30 UTC do mesmo dia.
+    function prazoDaData(dt) {
+      let p = dt.split('-');
+      return timestamp.date(int(p[0]), int(p[1]), int(p[2])) + duration.value(750, 'm');
+    }
+    function dataValida(dt) {
+      return dt is string && dt.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
     }
     function solicitacaoValida(solId, d) {
       let p = meuPerfil();
       let limite = get(/databases/$(database)/documents/modalidades/$(p.modalidadeId)).data.limite;
-      let ev = get(/databases/$(database)/documents/eventos/$(d.eventoId)).data;
       let ks = d.itens.keys();
-      let campos = ['modalidadeId', 'eventoId', 'horarioRetirada', 'quantidade', 'itens', 'usuarioId', 'usuarioNome', 'status', 'baixaNoFornecimento', 'criadoEm'];
+      let campos = ['modalidadeId', 'data', 'horarioRetirada', 'quantidade', 'itens', 'usuarioId', 'usuarioNome', 'status', 'baixaNoFornecimento', 'criadoEm'];
       return p.perfil == 'responsavel'
         && d.keys().hasOnly(campos)
         && d.keys().hasAll(campos)
         && d.modalidadeId == p.modalidadeId
-        && solId == p.modalidadeId + '_' + d.eventoId
+        && dataValida(d.data)
+        && solId == p.modalidadeId + '_' + d.data + '_' + string(getAfter(caminhoContador(p.modalidadeId + '_' + d.data)).data.n)
+        && request.time < prazoDaData(d.data)
         && d.usuarioId == request.auth.uid
         && d.usuarioNome == p.nome
         && d.status == 'pendente'
         && d.baixaNoFornecimento == true
         && d.criadoEm == request.time
-        && horaValida(d.horarioRetirada)
-        && ev.modalidadeId == p.modalidadeId
-        && d.quantidade is int
-        && d.quantidade >= 1
-        && limite is int
-        && d.quantidade <= limite
-        && d.itens is map
-        && ks.size() >= 1
-        && ks.size() <= 6
-        && itemNaPosicao(d, ks, 0)
-        && itemNaPosicao(d, ks, 1)
-        && itemNaPosicao(d, ks, 2)
-        && itemNaPosicao(d, ks, 3)
-        && itemNaPosicao(d, ks, 4)
-        && itemNaPosicao(d, ks, 5);
+        && d.horarioRetirada == '10:00 às 11:00'
+        && d.quantidade is number
+        && d.quantidade > 0
+        && itensDaSolicitacaoValidos(d, ks, limite);
     }
 
-    // ================= Mudança de status (Administrador) =================
+    // "Nova Solicitação" do Administrador: qualquer data e horário (sem prazo nem
+    // calendário), vinculada a um setor existente, cada item até o limite do setor,
+    // fora dos limites diários (não usa o contador) e já como "Pedido Recebido".
+    // Não altera o estoque: a baixa é feita no "Fornecido".
+    function solicitacaoAdminValida(solId, d) {
+      let p = meuPerfil();
+      let ks = d.itens.keys();
+      let campos = ['modalidadeId', 'data', 'horarioRetirada', 'quantidade', 'itens', 'usuarioId', 'usuarioNome', 'status', 'criadoPorAdmin', 'recebidoEm', 'recebidoPorUid', 'recebidoPorNome', 'baixaNoFornecimento', 'criadoEm'];
+      return p.perfil == 'admin'
+        && d.keys().hasOnly(campos)
+        && d.keys().hasAll(campos)
+        && d.modalidadeId is string
+        && dataValida(d.data)
+        && solId.matches(d.modalidadeId + '_' + d.data + '_adm[0-9]+')
+        && exists(/databases/$(database)/documents/modalidades/$(d.modalidadeId))
+        && d.usuarioId == request.auth.uid
+        && d.usuarioNome == p.nome
+        && d.status == 'recebido'
+        && d.criadoPorAdmin == true
+        && d.recebidoEm == request.time
+        && d.recebidoPorUid == request.auth.uid
+        && d.recebidoPorNome == p.nome
+        && d.baixaNoFornecimento == true
+        && d.criadoEm == request.time
+        && d.horarioRetirada == '10:00 às 11:00'
+        && d.quantidade is number
+        && d.quantidade > 0
+        && itensDaSolicitacaoValidos(d, ks, get(/databases/$(database)/documents/modalidades/$(d.modalidadeId)).data.limite);
+    }
+
+    // ================= Mudança de status =================
     function quemFez(n, prefixo) {
       return n[prefixo + 'Em'] == request.time
         && n[prefixo + 'PorUid'] == request.auth.uid
@@ -113,26 +188,60 @@ service cloud.firestore {
         && n.status == 'recebido'
         && quemFez(n, 'recebido');
     }
-    // Pedido Recebido -> Fornecido. Para solicitações novas, exige que cada item
-    // tenha recebido a baixa NESTE MESMO lote (ver regras de /itens).
+    // Pedido Recebido -> Fornecido.
+    // - Solicitações antigas (estoque já baixado na criação): só muda o status.
+    // - Solicitações novas: exige a quantidade fornecida de cada item (0 até a aprovada),
+    //   o registro de cada redução e a baixa de cada item NESTE MESMO lote.
+    //   O campo "itens" (quantidade aprovada) não pode ser alterado.
     function marcarFornecido(solId, n, a) {
       return a.status == 'recebido'
-        && n.diff(a).affectedKeys().hasOnly(['status', 'fornecidoEm', 'fornecidoPorUid', 'fornecidoPorNome'])
         && n.status == 'fornecido'
         && quemFez(n, 'fornecido')
-        && (a.get('baixaNoFornecimento', false) != true || baixasConferidas(solId, a));
+        && ((a.get('baixaNoFornecimento', false) != true
+              && n.diff(a).affectedKeys().hasOnly(['status', 'fornecidoEm', 'fornecidoPorUid', 'fornecidoPorNome']))
+            || (a.get('baixaNoFornecimento', false) == true
+              && n.diff(a).affectedKeys().hasOnly(['status', 'fornecidoEm', 'fornecidoPorUid', 'fornecidoPorNome', 'fornecidos', 'alteracoes'])
+              && fornecimentoValido(solId, n, a)));
     }
-    function baixasConferidas(solId, a) {
+    function fornecimentoValido(solId, n, a) {
       let ks = a.itens.keys();
-      return baixaNaPosicao(solId, ks, 0)
-        && baixaNaPosicao(solId, ks, 1)
-        && baixaNaPosicao(solId, ks, 2)
-        && baixaNaPosicao(solId, ks, 3)
-        && baixaNaPosicao(solId, ks, 4)
-        && baixaNaPosicao(solId, ks, 5);
+      return n.fornecidos is map
+        && n.alteracoes is map
+        && n.fornecidos.keys().hasOnly(ks)
+        && n.fornecidos.keys().hasAll(ks)
+        && n.alteracoes.keys().hasOnly(ks)
+        && fornecidoNaPosicao(solId, n, a, ks, 0)
+        && fornecidoNaPosicao(solId, n, a, ks, 1)
+        && fornecidoNaPosicao(solId, n, a, ks, 2)
+        && fornecidoNaPosicao(solId, n, a, ks, 3)
+        && fornecidoNaPosicao(solId, n, a, ks, 4)
+        && fornecidoNaPosicao(solId, n, a, ks, 5);
     }
-    function baixaNaPosicao(solId, ks, i) {
-      return ks.size() <= i || baixaFeitaAgora(solId, ks[i]);
+    function fornecidoNaPosicao(solId, n, a, ks, i) {
+      return ks.size() <= i || fornecidoDoItemValido(solId, n, a.itens[ks[i]], ks[i]);
+    }
+    // Fornecido entre 0 e o aprovado; redução registrada (e só quando houver redução);
+    // baixa do item feita neste mesmo lote.
+    function fornecidoDoItemValido(solId, n, aprovado, k) {
+      let f = n.fornecidos[k];
+      return f is number
+        && f >= 0
+        && f <= aprovado.quantidade
+        && ((f == aprovado.quantidade && !(k in n.alteracoes))
+            || (f < aprovado.quantidade && k in n.alteracoes && registroValido(n.alteracoes[k], aprovado, f)))
+        && baixaFeitaAgora(solId, k);
+    }
+    function registroValido(r, aprovado, f) {
+      return r is map
+        && r.keys().hasOnly(['nome', 'unidade', 'aprovada', 'fornecida', 'diferenca', 'justificativa'])
+        && r.keys().hasAll(['nome', 'unidade', 'aprovada', 'fornecida', 'diferenca', 'justificativa'])
+        && r.nome == aprovado.nome
+        && r.unidade == aprovado.unidade
+        && r.aprovada == aprovado.quantidade
+        && r.fornecida == f
+        && math.abs(r.diferenca - (aprovado.quantidade - f)) < TOL()
+        && r.justificativa is string
+        && r.justificativa.size() <= 300;
     }
     function baixaFeitaAgora(solId, k) {
       let depois = getAfter(caminhoItem(k)).data;
@@ -141,9 +250,9 @@ service cloud.firestore {
     }
 
     // ================= Estoque =================
-    // Baixa no "Fornecido": só saldo/saídas/marcadores, exatamente a quantidade da
-    // solicitação, e só no mesmo lote em que a solicitação é marcada como "fornecido"
-    // (fornecidoEm == agora). Essa marcação só é permitida ao Administrador/Catanheiro e só uma
+    // Baixa no "Fornecido": só saldo/saídas/marcadores, exatamente a quantidade FORNECIDA
+    // do item, e só no mesmo lote em que a solicitação é marcada como "fornecido"
+    // (fornecidoEm == agora). Essa marcação só é permitida ao Administrador/Paioleiro e só uma
     // vez (de "recebido" para "fornecido"), então a baixa nunca se repete — nem por
     // atualização da página, nem por clique duplo.
     function baixaPorFornecimento(itemId) {
@@ -157,29 +266,31 @@ service cloud.firestore {
              getAfter(caminhoSolicitacao(novo.ultimaBaixa)).data);
     }
     function baixaConfereComSolicitacao(itemId, novo, ant, sol) {
-      let q = sol.itens[itemId].quantidade;
+      let q = sol.fornecidos[itemId];
       return sol.status == 'fornecido'
         && sol.fornecidoEm == request.time
         && sol.get('baixaNoFornecimento', false) == true
-        && q is int
-        && novo.saldo == ant.saldo - q
-        && novo.saidas == ant.saidas + q
-        && novo.saldo >= 0;
+        && q is number
+        && math.abs(novo.saldo - (ant.saldo - q)) < TOL()
+        && math.abs(novo.saidas - (ant.saidas + q)) < TOL()
+        && novo.saldo >= -TOL();
     }
     function camposItem() {
       return ['nome', 'unidade', 'ativo', 'estoqueInicial', 'entradas', 'saidas', 'saldo', 'ultimaBaixa'];
     }
     function itemBasicoValido(d) {
-      return d.keys().hasOnly(camposItem().concat(['ultimaBaixaEm']))
+      return d.keys().hasOnly(camposItem().concat(['ultimaBaixaEm', 'precoUnitario']))
+        && (!('precoUnitario' in d) || d.precoUnitario == null || (d.precoUnitario is number && d.precoUnitario >= 0))
         && d.keys().hasAll(camposItem())
         && d.nome is string && d.nome.size() > 0
         && d.unidade is string && d.unidade.size() > 0
         && d.ativo is bool
-        && d.estoqueInicial is int && d.estoqueInicial >= 0
-        && d.entradas is int
-        && d.saidas is int
-        && d.saldo == d.estoqueInicial + d.entradas - d.saidas
-        && d.saldo >= 0;
+        && d.estoqueInicial is number && d.estoqueInicial >= 0
+        && d.entradas is number
+        && d.saidas is number
+        && d.saldo is number
+        && math.abs(d.saldo - (d.estoqueInicial + d.entradas - d.saidas)) < TOL()
+        && d.saldo >= -TOL();
     }
     function itemNovoValido(d) {
       return itemBasicoValido(d) && d.entradas == 0 && d.saidas == 0 && d.ultimaBaixa == '';
@@ -197,23 +308,201 @@ service cloud.firestore {
     // Perfis: cada pessoa lê o próprio; o Administrador lê todos.
     // Administradores só são criados pelo Console do Firebase.
     match /usuarios/{uid} {
-      allow read: if ehAdmin() || (logado() && request.auth.uid == uid);
-      allow create: if ehAdmin() && request.resource.data.perfil in ['responsavel', 'catanheiro'];
+      // O Paioleiro pode consultar perfis de Administrador apenas para que o vale
+      // não coloque o nome de um Administrador no campo PAIOLEIRO.
+      allow read: if ehAdmin() || (logado() && request.auth.uid == uid)
+        || (ehPaioleiro() && resource.data.perfil == 'admin');
+      // Cadastro: somente o Administrador. Novos administradores têm os mesmos poderes
+      // (todas as regras usam o perfil "admin" gravado aqui).
+      allow create: if ehAdmin()
+        && (request.resource.data.perfil in ['responsavel', 'paioleiro']
+            || (request.resource.data.perfil == 'admin'
+                && request.resource.data.keys().hasOnly(['nome', 'email', 'perfil'])
+                && request.resource.data.nome is string && request.resource.data.nome.size() > 0
+                && request.resource.data.email is string));
       allow update: if ehAdmin() && request.resource.data.perfil == resource.data.perfil;
+      // Exclusão: somente o Administrador, nunca a própria conta nem contas de Administrador
+      // (assim a última conta administrativa nunca é apagada), e sempre com o registro da
+      // exclusão gravado no mesmo lote (coleção "exclusoes", para auditoria).
+      // Administradores: nunca a própria conta (assim sempre sobra quem está excluindo,
+      // ou seja, a última conta administrativa nunca é apagada) e sempre passando pelo
+      // controle config/admins, que impede duas exclusões simultâneas de administradores.
+      allow delete: if ehAdmin()
+        && uid != request.auth.uid
+        && resource.data.perfil in ['responsavel', 'paioleiro', 'catanheiro', 'admin']
+        && existsAfter(/databases/$(database)/documents/exclusoes/$(uid))
+        && (resource.data.perfil != 'admin'
+            || (getAfter(/databases/$(database)/documents/config/admins).data.ultimaExclusao == uid
+                && getAfter(/databases/$(database)/documents/config/admins).data.em == request.time));
+    }
+
+    // Histórico de Exclusões: setores, usuários, itens e históricos excluídos.
+    // Criado pelo Administrador junto com cada exclusão (ou ao registrar uma falha).
+    // Para exclusões concluídas de usuários, o registro tem o mesmo id do usuário e
+    // só é aceito se o cadastro existia e foi apagado neste mesmo lote.
+    // O Administrador pode apagar registros deste histórico (ação registrada em /auditoria).
+    function caminhoUsuario(id) {
+      return /databases/$(database)/documents/usuarios/$(id);
+    }
+    function registroExclusaoValido(logId, d) {
+      return d.keys().hasOnly(['tipo', 'nome', 'identificacao', 'refId', 'setorId', 'unidade', 'operacao', 'resultado', 'detalhe', 'excluidoEm', 'porUid', 'porNome'])
+        && d.tipo in ['setor', 'responsavel', 'paioleiro', 'administrador', 'item', 'historico']
+        && d.operacao in ['individual', 'lote']
+        && d.resultado in ['concluida', 'falha']
+        && d.nome is string
+        && d.excluidoEm == request.time
+        && d.porUid == request.auth.uid
+        && d.porNome == meuPerfil().nome
+        && (d.resultado != 'concluida' || !(d.tipo in ['responsavel', 'paioleiro', 'administrador'])
+            || (logId == d.refId
+                && exists(caminhoUsuario(logId))
+                && !existsAfter(caminhoUsuario(logId))
+                && d.nome == get(caminhoUsuario(logId)).data.nome));
+    }
+    match /exclusoes/{logId} {
+      allow read: if ehAdmin();
+      allow create: if ehAdmin() && registroExclusaoValido(logId, request.resource.data);
+      allow update: if false;
+      allow delete: if ehAdmin();
+    }
+
+    // Contador por setor e data: número de pedidos (n), soma geral (total, informativa)
+    // e o acumulado de CADA item (itens). Só o responsável do setor avança o contador:
+    // n de 1 em 1 até o "Limite de pedidos por dia" e cada item somando exatamente a
+    // quantidade da nova solicitação, sem passar do limite do setor (por item, por dia).
+    // "legado": total do dia gravado antes da contagem por item; vale como acumulado de
+    // todo item ainda não contado separadamente (nunca deixa passar do limite).
+    // Sempre junto com a criação da solicitação na posição correspondente; solicitações
+    // simultâneas não passam juntas (o contador só aceita um avanço por vez).
+    function itemContadorOk(n, antItens, antLegado, sol, ks, i, limite) {
+      return ks.size() <= i
+        || (n.itens[ks[i]] is number
+          && math.abs(n.itens[ks[i]] - (antItens.get(ks[i], antLegado) + sol.itens[ks[i]].quantidade)) < TOL()
+          && n.itens[ks[i]] <= limite + TOL());
+    }
+    function contadorValido(id, n, antN, antTotal, antItens, antLegado) {
+      let p = meuPerfil();
+      let setor = get(/databases/$(database)/documents/modalidades/$(p.modalidadeId)).data;
+      let sol = getAfter(/databases/$(database)/documents/solicitacoes/$(id + '_' + string(n.n))).data;
+      let ks = sol.itens.keys();
+      return p.perfil == 'responsavel'
+        && n.keys().hasOnly(['setorId', 'data', 'n', 'total', 'itens', 'legado'])
+        && n.keys().hasAll(['setorId', 'data', 'n', 'total', 'itens', 'legado'])
+        && n.setorId == p.modalidadeId
+        && dataValida(n.data)
+        && id == n.setorId + '_' + n.data
+        && n.n is int
+        && n.n == antN + 1
+        && n.n <= setor.get('limiteDiario', 1)
+        && n.total is number
+        && sol.quantidade is number
+        && math.abs(n.total - (antTotal + sol.quantidade)) < TOL()
+        && setor.limite is number
+        && n.legado == antLegado
+        && n.itens is map
+        && n.itens.diff(antItens).affectedKeys().hasOnly(ks)
+        && itemContadorOk(n, antItens, antLegado, sol, ks, 0, setor.limite)
+        && itemContadorOk(n, antItens, antLegado, sol, ks, 1, setor.limite)
+        && itemContadorOk(n, antItens, antLegado, sol, ks, 2, setor.limite)
+        && itemContadorOk(n, antItens, antLegado, sol, ks, 3, setor.limite)
+        && itemContadorOk(n, antItens, antLegado, sol, ks, 4, setor.limite)
+        && itemContadorOk(n, antItens, antLegado, sol, ks, 5, setor.limite);
+    }
+    match /contadores/{id} {
+      allow read: if ehAdmin() || (ehResponsavel() && (resource == null || resource.data.setorId == minhaModalidade()));
+      allow create: if logado() && contadorValido(id, request.resource.data, 0, 0, {}, 0);
+      allow update: if logado() && resource.data.setorId == request.resource.data.setorId
+        && resource.data.data == request.resource.data.data
+        && contadorValido(id, request.resource.data, resource.data.n, resource.data.get('total', 0),
+             resource.data.get('itens', {}), resource.data.get('legado', resource.data.get('total', 0)));
       allow delete: if false;
     }
 
-    // Modalidades (inclui o limite de catanhos).
+    // Controle das exclusões de administradores: cada exclusão avança "versao" em 1.
+    // Duas exclusões simultâneas não conseguem usar a mesma versão (uma é recusada).
+    function controleAdminValido(n, versaoAnterior) {
+      return n.keys().hasOnly(['versao', 'ultimaExclusao', 'em', 'porUid'])
+        && n.versao == versaoAnterior + 1
+        && n.ultimaExclusao is string
+        && n.ultimaExclusao != request.auth.uid
+        && n.em == request.time
+        && n.porUid == request.auth.uid
+        && !existsAfter(/databases/$(database)/documents/usuarios/$(n.ultimaExclusao));
+    }
+
+    match /config/admins {
+      allow read: if ehAdmin();
+      allow create: if ehAdmin() && controleAdminValido(request.resource.data, 0);
+      allow update: if ehAdmin() && controleAdminValido(request.resource.data, resource.data.versao);
+      allow delete: if false;
+    }
+
+    // Vale Extraordinário de Gêneros (CN-42): um vale por item e data, gerado pelo
+    // Paioleiro ou pelo Administrador, sem numeração e sem valores em reais.
+    // Fica registrado para consulta; gerar um vale não altera estoque nem solicitações.
+    function ehGeradorDeVale() {
+      return ehAdmin() || ehPaioleiro();
+    }
+    match /vales/{valeId} {
+      allow read: if ehGeradorDeVale();
+      allow create, update: if ehGeradorDeVale()
+        && request.resource.data.data is string
+        && request.resource.data.itemId is string
+        && ((request.resource.data.setorId == null && valeId == request.resource.data.data + '_' + request.resource.data.itemId + '_todos')
+            || (request.resource.data.setorId is string && valeId == request.resource.data.data + '_' + request.resource.data.itemId + '_' + request.resource.data.setorId))
+        && request.resource.data.geradoPorUid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // ---------- Assinaturas do Vale (imagens) ----------
+    // "fiel" = Fiel de Municiamento; "autorizado" = Autorizado por.
+    // Só o Administrador cadastra; Administrador e Paioleiro leem (para gerar o vale).
+    function assinaturaValida(campo, d) {
+      return (campo == 'fiel' || campo == 'autorizado')
+        && d.keys().hasOnly(['imagem', 'largura', 'altura', 'atualizadoEm', 'atualizadoPor', 'atualizadoPorNome'])
+        && d.keys().hasAll(['imagem', 'largura', 'altura', 'atualizadoEm', 'atualizadoPor', 'atualizadoPorNome'])
+        && d.imagem is string
+        && d.imagem.size() <= 600000
+        && d.imagem.matches('data:image/png;base64,[A-Za-z0-9+/]+=*')
+        && d.largura is int && d.largura >= 1 && d.largura <= 600
+        && d.altura is int && d.altura >= 1 && d.altura <= 300
+        && d.atualizadoEm == request.time
+        && d.atualizadoPor == request.auth.uid
+        && d.atualizadoPorNome is string;
+    }
+    match /assinaturas/{campo} {
+      allow read: if ehGeradorDeVale();
+      allow create, update: if ehAdmin() && assinaturaValida(campo, request.resource.data);
+      allow delete: if ehAdmin();
+    }
+
+    // Registro administrativo das exclusões de históricos (rastreabilidade).
+    // Só o Administrador cria e lê; ninguém altera nem apaga.
+    match /auditoria/{id} {
+      allow read: if ehAdmin();
+      allow create: if ehAdmin()
+        && request.resource.data.keys().hasOnly(['acao', 'colecao', 'nomeHistorico', 'quantidade', 'descricao', 'em', 'porUid', 'porNome'])
+        && request.resource.data.acao == 'exclusao_historico'
+        && request.resource.data.colecao in ['exclusoes', 'movimentos', 'solicitacoes']
+        && request.resource.data.quantidade is int
+        && request.resource.data.em == request.time
+        && request.resource.data.porUid == request.auth.uid
+        && request.resource.data.porNome == meuPerfil().nome;
+      allow update, delete: if false;
+    }
+
+    // Setores (coleção "modalidades"; inclui o limite de pedidos). Criar, editar e
+    // excluir: somente o Administrador. A exclusão é registrada no Histórico de Exclusões.
     match /modalidades/{id} {
-      allow read: if ehAdmin() || ehCatanheiro() || (ehResponsavel() && minhaModalidade() == id);
+      allow read: if ehAdmin() || ehPaioleiro() || (ehResponsavel() && minhaModalidade() == id);
       allow write: if ehAdmin();
     }
 
-    // Eventos: cada evento pertence a uma modalidade.
+    // Eventos: substituídos pelo calendário. Mantidos apenas para consulta das
+    // solicitações antigas; não podem mais ser criados nem alterados.
     match /eventos/{id} {
-      allow read: if ehAdmin() || ehCatanheiro() || (ehResponsavel() && resource.data.modalidadeId == minhaModalidade());
-      allow create, update: if ehAdmin() && request.resource.data.modalidadeId is string;
-      allow delete: if false;
+      allow read: if ehAdmin() || ehPaioleiro() || (ehResponsavel() && resource.data.modalidadeId == minhaModalidade());
+      allow write: if false;
     }
 
     // Itens e estoque. O responsável apenas lê o catálogo; somente o
@@ -222,10 +511,12 @@ service cloud.firestore {
       allow read: if temPerfil();
       allow create: if ehAdmin() && itemNovoValido(request.resource.data);
       // A baixa por fornecimento só é aceita junto com a marcação "Fornecido",
-      // permitida apenas ao Administrador e ao Catanheiro (ver regras de /solicitacoes).
+      // permitida apenas ao Administrador e ao Paioleiro (ver regras de /solicitacoes).
       allow update: if baixaPorFornecimento(itemId)
         || (ehAdmin() && itemAlteradoPeloAdmin(request.resource.data, resource.data));
-      allow delete: if false;
+      // Exclusão: somente o Administrador e somente sem saldo em estoque
+      // (as movimentações e os fornecimentos anteriores são preservados).
+      allow delete: if ehAdmin() && resource.data.saldo == 0;
     }
 
     // Movimentações de estoque feitas pelo Administrador (estoque inicial e entradas).
@@ -235,30 +526,36 @@ service cloud.firestore {
       allow create: if ehAdmin()
         && request.resource.data.keys().hasOnly(['itemId', 'itemNome', 'tipo', 'quantidade', 'criadoEm', 'porUid', 'porNome'])
         && request.resource.data.tipo in ['inicial', 'entrada']
-        && request.resource.data.quantidade is int
+        && request.resource.data.quantidade is number
         && request.resource.data.quantidade >= 0
         && request.resource.data.criadoEm == request.time
         && request.resource.data.porUid == request.auth.uid;
-      allow update, delete: if false;
+      allow update: if false;
+      // Exclusão de histórico: somente o Administrador (registrada em /auditoria).
+      allow delete: if ehAdmin();
     }
 
     // Solicitações.
     match /solicitacoes/{solId} {
-      // "resource == null" permite ao responsável verificar se já pediu para um evento
+      // "resource == null" permite ao responsável verificar se já pediu para uma data
       // (consulta a um documento que ainda não existe; nada é revelado).
-      // O Catanheiro vê apenas solicitações autorizadas ("Pedido Recebido") e as já fornecidas.
+      // O Paioleiro vê apenas solicitações autorizadas ("Pedido Recebido") e as já fornecidas.
       allow read: if ehAdmin()
         || (ehResponsavel() && (resource == null || resource.data.modalidadeId == minhaModalidade()))
-        || (ehCatanheiro() && resource != null && resource.data.status in ['recebido', 'fornecido']);
-      // Uma solicitação por evento: o identificador é "modalidade_evento" e um
+        || (ehPaioleiro() && resource != null && resource.data.status in ['recebido', 'fornecido']);
+      // Uma solicitação por data: o identificador é "modalidade_AAAA-MM-DD" e um
       // documento existente nunca pode ser recriado pelo responsável.
-      allow create: if logado() && solicitacaoValida(solId, request.resource.data);
+      // Responsável (com prazo, calendário e limites diários) ou "Nova Solicitação" do Administrador.
+      allow create: if logado() && (solicitacaoAdminValida(solId, request.resource.data)
+        || solicitacaoValida(solId, request.resource.data));
       // Status sempre na ordem pendente -> recebido -> fornecido, sem voltar atrás.
       // "Pedido Recebido" (autorização): somente o Administrador.
-      // "Fornecido" (com baixa no estoque): Administrador ou Catanheiro.
+      // "Fornecido" (com baixa no estoque): Administrador ou Paioleiro.
       allow update: if (ehAdmin() && marcarRecebido(request.resource.data, resource.data))
-        || ((ehAdmin() || ehCatanheiro()) && marcarFornecido(solId, request.resource.data, resource.data));
-      allow delete: if false;
+        || ((ehAdmin() || ehPaioleiro()) && marcarFornecido(solId, request.resource.data, resource.data));
+      // Exclusão de histórico: somente o Administrador e somente solicitações concluídas
+      // (Fornecido/Atendido), para não afetar pedidos em andamento nem o estoque.
+      allow delete: if ehAdmin() && resource.data.status in ['fornecido', 'atendido'];
     }
   }
 }

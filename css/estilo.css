@@ -399,3 +399,48 @@ tr.grupo-data.recolhido td{opacity:.92}
   .tabela-wrap .tabela-qtd tbody td:nth-child(2){color:var(--texto-suave);font-weight:600}
   .tabela-wrap .tabela-qtd td input{width:100px;max-width:100px}
 }
+
+/* ===== Solicitações: calendário de retiradas ===== */
+.cs-layout{display:grid;grid-template-columns:minmax(300px,380px) minmax(0,1fr);gap:1.2rem;align-items:start}
+.cs-layout>*{min-width:0}
+.cs-cal{border:1px solid var(--linha);border-radius:var(--raio);padding:.8rem;background:#fff;position:sticky;top:.8rem}
+.cs-topo{display:flex;align-items:center;gap:.35rem;margin-bottom:.6rem}
+.cs-topo select{margin:0;padding:.4rem 1.7rem .4rem .55rem;width:auto;flex:1;min-width:0}
+.cs-topo #csAno{flex:none;width:5.6rem}
+.cs-topo .btn{flex:none;padding-left:.55rem;padding-right:.55rem}
+.cs-sem,.cs-grade{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:.3rem}
+.cs-sem span{text-align:center;font-size:.72rem;font-weight:700;color:var(--azul-800);text-transform:uppercase}
+.cs-dia{position:relative;aspect-ratio:1/1;min-height:2.5rem;border:1px solid #e3eaf6;border-radius:8px;background:#fff;color:var(--texto-suave);font:inherit;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.cs-dia:hover{border-color:var(--azul-400)}
+.cs-dia:focus-visible{outline:2px solid var(--azul-600);outline-offset:1px}
+.cs-dia.vazio{border:none;background:none;cursor:default}
+.cs-dia.com{background:var(--azul-100);border-color:var(--azul-400);color:var(--azul-900)}
+.cs-dia .cs-n{position:absolute;top:2px;right:2px;min-width:.95rem;height:.95rem;padding:0 .18rem;border-radius:99px;background:var(--azul-700);color:#fff;font-size:.6rem;line-height:.95rem;font-weight:700}
+.cs-dia .cs-pend{position:absolute;bottom:3px;left:50%;transform:translateX(-50%);width:6px;height:6px;border-radius:50%;background:#e9a23b}
+.cs-dia.hoje{box-shadow:inset 0 0 0 2px var(--azul-600)}
+.cs-dia.sel{background:var(--azul-700);border-color:var(--azul-700);color:#fff}
+.cs-dia.sel .cs-n{background:#fff;color:var(--azul-700)}
+.cs-leg{display:flex;flex-wrap:wrap;gap:.35rem .9rem;margin-top:.7rem;font-size:.78rem;color:var(--texto-suave)}
+.cs-leg span{display:flex;align-items:center;gap:.3rem}
+.cs-leg i{display:inline-block;width:.9rem;height:.9rem;border-radius:4px;border:1px solid #e3eaf6;background:#fff}
+.cs-leg i.com{background:var(--azul-100);border-color:var(--azul-400)}
+.cs-leg i.sel{background:var(--azul-700);border-color:var(--azul-700)}
+.cs-leg i.pend{width:.45rem;height:.45rem;border-radius:50%;background:#e9a23b;border:none}
+.cs-cal .cs-lista{width:100%;margin-top:.7rem}
+.cs-cab{background:var(--azul-800);color:#fff;border-radius:10px;padding:.7rem .9rem;margin-bottom:.7rem}
+.cs-cab strong{font-size:1.05rem}
+.cs-cab .grupo-info{display:block;margin-top:.15rem;color:var(--azul-200);font-size:.85rem}
+.cs-cab .grupo-itens{font-size:.85rem;color:var(--azul-100);margin-top:.2rem}
+.cs-cab .grupo-itens strong{color:#fff;font-size:inherit}
+.cs-vazio{border:1px dashed var(--azul-200);border-radius:10px;padding:1.6rem 1rem;text-align:center;color:var(--texto-suave);background:#fff}
+.cs-link{background:none;border:none;padding:0;font:inherit;color:var(--azul-700);font-weight:700;text-decoration:underline;cursor:pointer}
+.cs-num{font-weight:700;color:var(--azul-700);white-space:nowrap}
+@media (max-width:1099px){
+  .cs-layout{grid-template-columns:1fr}
+  .cs-cal{position:static;max-width:480px;width:100%;margin:0 auto}
+}
+@media (max-width:420px){
+  .cs-cal{padding:.6rem}
+  .cs-sem,.cs-grade{gap:.22rem}
+  .cs-dia{min-height:2.3rem;font-size:.92rem}
+}
