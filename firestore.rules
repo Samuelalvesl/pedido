@@ -197,11 +197,64 @@ service cloud.firestore {
       return a.status == 'recebido'
         && n.status == 'fornecido'
         && quemFez(n, 'fornecido')
+        && dataEfetivaValida(n.get('dataEfetiva', null))
         && ((a.get('baixaNoFornecimento', false) != true
-              && n.diff(a).affectedKeys().hasOnly(['status', 'fornecidoEm', 'fornecidoPorUid', 'fornecidoPorNome']))
+              && n.diff(a).affectedKeys().hasOnly(['status', 'fornecidoEm', 'fornecidoPorUid', 'fornecidoPorNome', 'dataEfetiva']))
             || (a.get('baixaNoFornecimento', false) == true
-              && n.diff(a).affectedKeys().hasOnly(['status', 'fornecidoEm', 'fornecidoPorUid', 'fornecidoPorNome', 'fornecidos', 'alteracoes'])
+              && n.diff(a).affectedKeys().hasOnly(['status', 'fornecidoEm', 'fornecidoPorUid', 'fornecidoPorNome', 'fornecidos', 'alteracoes', 'dataEfetiva'])
               && fornecimentoValido(solId, n, a)));
+    }
+
+    // ================= Data efetiva do fornecimento/baixa =================
+    // "AAAA-MM-DD": nunca futura (00h de Brasília = 03h UTC já passou); o Paioleiro só pode
+    // voltar até "diasRetroativos" dias (config/fornecimento; padrão 7); o Administrador não
+    // tem esse limite. O lançamento real fica em "fornecidoEm" (horário do servidor).
+    function inicioDoDiaBrasilia(dt) {
+      let p = dt.split('-');
+      return timestamp.date(int(p[0]), int(p[1]), int(p[2])) + duration.value(180, 'm');
+    }
+    function caminhoConfigForn() {
+      return /databases/$(database)/documents/config/fornecimento;
+    }
+    function dentroDaJanela(dt) {
+      return ehAdmin()
+        || (!exists(caminhoConfigForn()) && inicioDoDiaBrasilia(dt) + duration.value(8, 'd') > request.time)
+        || (exists(caminhoConfigForn()) && inicioDoDiaBrasilia(dt) + duration.value(get(caminhoConfigForn()).data.diasRetroativos + 1, 'd') > request.time);
+    }
+    function dataEfetivaValida(dt) {
+      return dataValida(dt)
+        && inicioDoDiaBrasilia(dt) <= request.time
+        && dentroDaJanela(dt);
+    }
+    // Correção da data efetiva de um pedido já fornecido: somente Administrador, com
+    // registro de auditoria no mesmo lote. Não mexe em quantidades nem no estoque.
+    function corrigirDataEfetiva(solId, n, a) {
+      let k = n.get('correcoesDataEfetiva', 0);
+      return a.status == 'fornecido'
+        && n.diff(a).affectedKeys().hasOnly(['dataEfetiva', 'correcoesDataEfetiva', 'dataEfetivaCorrigidaEm', 'dataEfetivaCorrigidaPorUid', 'dataEfetivaCorrigidaPorNome'])
+        && dataValida(n.dataEfetiva)
+        && inicioDoDiaBrasilia(n.dataEfetiva) <= request.time
+        && k is int
+        && k == a.get('correcoesDataEfetiva', 0) + 1
+        && n.dataEfetivaCorrigidaEm == request.time
+        && n.dataEfetivaCorrigidaPorUid == request.auth.uid
+        && n.dataEfetivaCorrigidaPorNome == meuPerfil().nome
+        && existsAfter(/databases/$(database)/documents/auditoriaPedidos/$(solId + '_data_' + string(k)));
+    }
+
+    // ================= Cancelamento =================
+    // Somente Administrador, somente antes do fornecimento (Pendente ou Pedido Recebido),
+    // uma única vez e com registro de auditoria no mesmo lote. O registro não é apagado e
+    // o estoque não é alterado (não houve baixa). Pedido cancelado não pode ser fornecido.
+    function cancelarPedido(solId, n, a) {
+      return a.get('status', 'pendente') in ['pendente', 'recebido']
+        && n.status == 'cancelado'
+        && n.statusAnterior == a.get('status', 'pendente')
+        && n.diff(a).affectedKeys().hasOnly(['status', 'statusAnterior', 'canceladoEm', 'canceladoPorUid', 'canceladoPorNome'])
+        && n.canceladoEm == request.time
+        && n.canceladoPorUid == request.auth.uid
+        && n.canceladoPorNome == meuPerfil().nome
+        && existsAfter(/databases/$(database)/documents/auditoriaPedidos/$(solId + '_cancelamento'));
     }
     function fornecimentoValido(solId, n, a) {
       let ks = a.itens.keys();
@@ -443,15 +496,85 @@ service cloud.firestore {
     function ehGeradorDeVale() {
       return ehAdmin() || ehPaioleiro();
     }
+    function valeBasicoValido(valeId, d) {
+      return ehGeradorDeVale()
+        && d.data is string
+        && d.itemId is string
+        && ((d.setorId == null && valeId == d.data + '_' + d.itemId + '_todos')
+            || (d.setorId is string && valeId == d.data + '_' + d.itemId + '_' + d.setorId))
+        && d.geradoPorUid == request.auth.uid;
+    }
+    // Versões: cada nova geração (após lançamento retroativo ou correção da data efetiva)
+    // avança "versao" e acrescenta a versão anterior em "versoesAnteriores", sem apagar nenhuma.
+    function versaoValeValida(n, a) {
+      let ant = a.get('versoesAnteriores', []);
+      return n.get('versao', 1) == a.get('versao', 1) + 1
+        && n.versoesAnteriores is list
+        && n.versoesAnteriores.size() == ant.size() + 1
+        && n.versoesAnteriores[0:ant.size()] == ant;
+    }
     match /vales/{valeId} {
       allow read: if ehGeradorDeVale();
-      allow create, update: if ehGeradorDeVale()
-        && request.resource.data.data is string
-        && request.resource.data.itemId is string
-        && ((request.resource.data.setorId == null && valeId == request.resource.data.data + '_' + request.resource.data.itemId + '_todos')
-            || (request.resource.data.setorId is string && valeId == request.resource.data.data + '_' + request.resource.data.itemId + '_' + request.resource.data.setorId))
-        && request.resource.data.geradoPorUid == request.auth.uid;
+      allow create: if valeBasicoValido(valeId, request.resource.data);
+      allow update: if valeBasicoValido(valeId, request.resource.data) && versaoValeValida(request.resource.data, resource.data);
       allow delete: if false;
+    }
+
+    // Data efetiva: dias retroativos permitidos ao Paioleiro (definidos pelo Administrador).
+    match /config/fornecimento {
+      allow read: if ehAdmin() || ehPaioleiro();
+      allow create, update: if ehAdmin()
+        && request.resource.data.keys().hasOnly(['diasRetroativos', 'atualizadoEm', 'atualizadoPorUid', 'atualizadoPorNome'])
+        && request.resource.data.diasRetroativos is int
+        && request.resource.data.diasRetroativos >= 0
+        && request.resource.data.diasRetroativos <= 365
+        && request.resource.data.atualizadoEm == request.time
+        && request.resource.data.atualizadoPorUid == request.auth.uid
+        && request.resource.data.atualizadoPorNome == meuPerfil().nome;
+      allow delete: if false;
+    }
+
+    // Auditoria de pedidos: cancelamentos e correções da data efetiva.
+    // Só o Administrador cria e lê; ninguém altera nem apaga.
+    function auditoriaCancelamentoValida(id, d) {
+      let antes = get(caminhoSolicitacao(d.solicitacaoId)).data;
+      return d.keys().hasOnly(['tipo', 'solicitacaoId', 'setorId', 'setorNome', 'dataRetirada', 'statusAnterior', 'statusNovo', 'em', 'porUid', 'porNome'])
+        && d.keys().hasAll(['tipo', 'solicitacaoId', 'setorId', 'setorNome', 'dataRetirada', 'statusAnterior', 'statusNovo', 'em', 'porUid', 'porNome'])
+        && d.tipo == 'cancelamento'
+        && id == d.solicitacaoId + '_cancelamento'
+        && d.setorId == antes.modalidadeId
+        && d.setorNome is string
+        && d.dataRetirada is string
+        && d.statusAnterior == antes.get('status', 'pendente')
+        && d.statusNovo == 'cancelado'
+        && getAfter(caminhoSolicitacao(d.solicitacaoId)).data.status == 'cancelado'
+        && d.em == request.time
+        && d.porUid == request.auth.uid
+        && d.porNome == meuPerfil().nome;
+    }
+    function auditoriaCorrecaoValida(id, d) {
+      let antes = get(caminhoSolicitacao(d.solicitacaoId)).data;
+      let depois = getAfter(caminhoSolicitacao(d.solicitacaoId)).data;
+      return d.keys().hasOnly(['tipo', 'solicitacaoId', 'setorId', 'setorNome', 'dataAnterior', 'dataNova', 'motivo', 'em', 'porUid', 'porNome'])
+        && d.keys().hasAll(['tipo', 'solicitacaoId', 'setorId', 'setorNome', 'dataAnterior', 'dataNova', 'motivo', 'em', 'porUid', 'porNome'])
+        && d.tipo == 'correcao_data_efetiva'
+        && id == d.solicitacaoId + '_data_' + string(depois.correcoesDataEfetiva)
+        && d.setorId == antes.modalidadeId
+        && d.setorNome is string
+        && d.dataAnterior is string
+        && d.dataNova == depois.dataEfetiva
+        && d.motivo is string
+        && d.motivo.size() >= 3
+        && d.motivo.size() <= 300
+        && d.em == request.time
+        && d.porUid == request.auth.uid
+        && d.porNome == meuPerfil().nome;
+    }
+    match /auditoriaPedidos/{id} {
+      allow read: if ehAdmin();
+      allow create: if ehAdmin() && request.resource.data.solicitacaoId is string
+        && (auditoriaCancelamentoValida(id, request.resource.data) || auditoriaCorrecaoValida(id, request.resource.data));
+      allow update, delete: if false;
     }
 
     // ---------- Assinaturas do Vale (imagens) ----------
@@ -552,7 +675,9 @@ service cloud.firestore {
       // "Pedido Recebido" (autorização): somente o Administrador.
       // "Fornecido" (com baixa no estoque): Administrador ou Paioleiro.
       allow update: if (ehAdmin() && marcarRecebido(request.resource.data, resource.data))
-        || ((ehAdmin() || ehPaioleiro()) && marcarFornecido(solId, request.resource.data, resource.data));
+        || ((ehAdmin() || ehPaioleiro()) && marcarFornecido(solId, request.resource.data, resource.data))
+        || (ehAdmin() && cancelarPedido(solId, request.resource.data, resource.data))
+        || (ehAdmin() && corrigirDataEfetiva(solId, request.resource.data, resource.data));
       // Exclusão de histórico: somente o Administrador e somente solicitações concluídas
       // (Fornecido/Atendido), para não afetar pedidos em andamento nem o estoque.
       allow delete: if ehAdmin() && resource.data.status in ['fornecido', 'atendido'];
