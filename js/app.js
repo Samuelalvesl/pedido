@@ -194,9 +194,16 @@
   // "atendido" existe apenas em solicitações antigas (anteriores a este fluxo).
   // Solicitação registrada pelo Administrador ("Nova Solicitação").
   const criadaPeloAdmin = s => s.criadoPorAdmin === true;
-  const statusDe = s => ['recebido', 'fornecido', 'atendido'].includes(s.status) ? s.status : 'pendente';
-  const grupoDe = s => ({ pendente: 'pendentes', recebido: 'recebidos', fornecido: 'fornecidos', atendido: 'fornecidos' })[statusDe(s)];
-  const classeLinha = s => ({ pendente: 'linha-pendente', recebido: 'linha-recebida', fornecido: 'linha-atendida', atendido: 'linha-atendida' })[statusDe(s)];
+  const statusDe = s => ['recebido', 'fornecido', 'atendido', 'cancelado'].includes(s.status) ? s.status : 'pendente';
+  const grupoDe = s => ({ pendente: 'pendentes', recebido: 'recebidos', fornecido: 'fornecidos', atendido: 'fornecidos', cancelado: 'cancelados' })[statusDe(s)];
+  const classeLinha = s => ({ pendente: 'linha-pendente', recebido: 'linha-recebida', fornecido: 'linha-atendida', atendido: 'linha-atendida', cancelado: 'linha-cancelada' })[statusDe(s)];
+  const cancelada = s => statusDe(s) === 'cancelado';
+  const NOME_STATUS = { pendente: 'Pendente', recebido: 'Pedido Recebido', fornecido: 'Fornecido', atendido: 'Atendido', cancelado: 'Cancelado' };
+  // Data efetiva do fornecimento/baixa ("AAAA-MM-DD"). Fornecimentos anteriores a este campo
+  // usam o dia (Brasília) em que foram lançados.
+  const diaDoLancamento = ts => { if (!ts || !ts.toMillis) return ''; const b = new Date(ts.toMillis() - FUSO_BRASILIA_MS); return isoData(b.getUTCFullYear(), b.getUTCMonth() + 1, b.getUTCDate()); };
+  const dataEfetivaDe = s => s.dataEfetiva || diaDoLancamento(s.fornecidoEm);
+  const retroativo = s => !!s.dataEfetiva && !!s.fornecidoEm && s.dataEfetiva !== diaDoLancamento(s.fornecidoEm);
   // Solicitações novas baixam o estoque no "Fornecido"; as antigas já baixaram ao serem criadas.
   const baixaNoFornecimento = s => s.baixaNoFornecimento === true;
   const estoqueBaixado = s => baixaNoFornecimento(s) ? statusDe(s) === 'fornecido' : true;
@@ -243,13 +250,19 @@
       pendente: '<span class="status pendente">● Pendente</span>',
       recebido: '<span class="status recebido">◐ Pedido Recebido</span>',
       fornecido: '<span class="status atendido">✓ Fornecido</span>',
-      atendido: '<span class="status atendido">✓ Atendido</span>'
+      atendido: '<span class="status atendido">✓ Atendido</span>',
+      cancelado: '<span class="status cancelado">✕ Cancelado</span>'
     }[statusDe(s)];
   }
   function historicoStatus(s) {
     const linhas = [];
     if (s.recebidoEm) linhas.push(`Recebido: ${fmtDataHora(s.recebidoEm)} por ${esc(s.recebidoPorNome || '—')}`);
-    if (s.fornecidoEm) linhas.push(`Fornecido: ${fmtDataHora(s.fornecidoEm)} por ${esc(s.fornecidoPorNome || '—')}`);
+    if (s.fornecidoEm && s.dataEfetiva) {
+      linhas.push(`<strong>Fornecido em ${esc(fmtData(s.dataEfetiva))}</strong> (data efetiva)${retroativo(s) ? ' <span class="selo-retro">retroativo</span>' : ''}`);
+      linhas.push(`Lançado em ${fmtDataHora(s.fornecidoEm)} por ${esc(s.fornecidoPorNome || '—')}`);
+      if (s.dataEfetivaCorrigidaEm) linhas.push(`Data efetiva corrigida em ${fmtDataHora(s.dataEfetivaCorrigidaEm)} por ${esc(s.dataEfetivaCorrigidaPorNome || '—')}`);
+    } else if (s.fornecidoEm) linhas.push(`Fornecido: ${fmtDataHora(s.fornecidoEm)} por ${esc(s.fornecidoPorNome || '—')}`);
+    if (s.canceladoEm) linhas.push(`Cancelado: ${fmtDataHora(s.canceladoEm)} por ${esc(s.canceladoPorNome || '—')}<br>Status anterior: ${esc(NOME_STATUS[s.statusAnterior] || s.statusAnterior || '—')}`);
     if (s.atendidoEm) linhas.push(`Atendido: ${fmtDataHora(s.atendidoEm)} por ${esc(s.atendidoPorNome || '—')}`);
     return linhas.length ? `<div class="atendimento">${linhas.join('<br>')}</div>` : '';
   }
@@ -833,6 +846,7 @@
           lista('auditoria').catch(() => []), lista('vales').catch(() => [])
         ]);
         dados = { modalidades, eventos, usuarios, solicitacoes, itens, movimentos, exclusoes, auditoria, vales };
+        await carregarConfigForn();
       } catch (e) {
         return telaFalha('Administrador', e, () => telaAdmin(aba, '', true));
       }
@@ -1134,8 +1148,9 @@
   const chaveVale = (dt, itemId, setorId) => `${dt}_${itemId}_${setorId || 'todos'}`;
 
   // Fornecimentos ("Fornecido") feitos na data, opcionalmente de um setor.
+  // O Vale usa a DATA EFETIVA do fornecimento (não o dia em que foi lançado no sistema).
   const fornecimentosDaData = (dt, setorId) => dados.solicitacoes.filter(s =>
-    statusDe(s) === 'fornecido' && diaBrasilia(s.fornecidoEm) === dt && (!setorId || s.modalidadeId === setorId));
+    statusDe(s) === 'fornecido' && dataEfetivaDe(s) === dt && (!setorId || s.modalidadeId === setorId));
   // Itens que aparecem nos fornecimentos da data.
   function itensFornecidosNaData(dt, setorId) {
     const m = new Map();
@@ -1191,14 +1206,39 @@
   }
 
   // Grava (ou atualiza) o registro do vale, para consulta e nova geração.
+  // Cada vale (data efetiva + item + setor) guarda a versão atual e as anteriores.
+  // Gerar de novo sem mudança nos fornecimentos não cria versão nova (só baixa o PDF).
+  const CAMPOS_VERSAO = ['linhas', 'setoresNomes', 'complementares', 'paioleiros', 'totalSol', 'totalForn', 'qtdFornecimentos', 'geradoPorNome', 'atualizadoEm', 'versao'];
+  const idsDoVale = v => (v.linhas || []).flatMap(l => l.solicitacoes || []).slice().sort().join(',');
+  const assinaturaVale = v => JSON.stringify([(v.linhas || []).map(l => [l.setor, l.qtdSol, l.qtdForn, l.obs, (l.solicitacoes || []).slice().sort()]), v.totalForn, v.complementares || '', (v.paioleiros || []).slice().sort()]);
   async function registrarVale(conteudo) {
     const ref = doc(db, 'vales', chaveVale(conteudo.data, conteudo.itemId, conteudo.setorId));
     const existente = await getDoc(ref);
+    const ant = existente.exists() ? existente.data() : null;
+    if (ant && assinaturaVale(ant) === assinaturaVale(conteudo)) return { ...ant, id: ref.id };   // nada mudou
+    const fotoAnterior = ant ? { ...Object.fromEntries(CAMPOS_VERSAO.filter(k => ant[k] !== undefined).map(k => [k, ant[k]])), versao: ant.versao || 1 } : null;
+    const anteriores = ant ? [...(ant.versoesAnteriores || []), fotoAnterior] : [];
     const v = { ...conteudo, atualizadoEm: serverTimestamp(), geradoPorUid: perfil.uid, geradoPorNome: perfil.nome,
-      criadoEm: existente.exists() && existente.data().criadoEm ? existente.data().criadoEm : serverTimestamp(),
-      geracoes: existente.exists() ? (existente.data().geracoes || 1) + 1 : 1 };
+      criadoEm: ant && ant.criadoEm ? ant.criadoEm : serverTimestamp(),
+      geracoes: ant ? (ant.geracoes || 1) + 1 : 1,
+      versao: ant ? (ant.versao || 1) + 1 : 1,
+      versoesAnteriores: anteriores };
     await setDoc(ref, v);
     return { ...v, id: ref.id };
+  }
+  // Fornecimentos que entraram ou saíram da data do vale depois que ele foi gerado
+  // (lançamento retroativo ou correção da data efetiva).
+  function mudancasDoVale(x) {
+    const atual = montarVale(x.data, x.itemId, x.setorId || '', x.complementares || '');
+    const antes = new Set(idsDoVale(x).split(',').filter(Boolean)), agora = new Set(idsDoVale(atual).split(',').filter(Boolean));
+    const novos = [...agora].filter(id => !antes.has(id)).map(id => dados.solicitacoes.find(s => s.id === id)).filter(Boolean);
+    const saiu = [...antes].filter(id => !agora.has(id));
+    const qtdItem = s => { const i = itensDaSolicitacao(s).find(y => y.id === x.itemId); return i ? qtdUn(qtdFornecida(s, i), i.unidade) : ''; };
+    const texto = [
+      ...novos.map(s => `${nomeSetor(s.modalidadeId)} (${qtdItem(s)}) lançado em ${fmtDataHora(s.fornecidoEm)} com data efetiva ${fmtData(dataEfetivaDe(s))}`),
+      ...(saiu.length ? [`${plural(saiu.length, 'fornecimento teve', 'fornecimentos tiveram')} a data efetiva corrigida para outro dia`] : [])
+    ];
+    return { mudou: assinaturaVale(atual) !== assinaturaVale(x) && atual.linhas.length > 0, texto, atual };
   }
 
   // ---------- Desenho do PDF (página Carta, medidas do modelo CN-42, em pontos) ----------
@@ -1353,7 +1393,7 @@
         <h2>📄 Vale Extraordinário de Gêneros (CN-42)</h2>
         <p class="muted small" style="margin-top:-.3rem">Um vale por item, com os fornecimentos efetivamente realizados na data (somente "Fornecido", com as quantidades fornecidas). A tabela lista os setores e o total do item, em quantidade, aparece embaixo. O estoque e as solicitações não são alterados.</p>
         <div class="grade">
-          <label>Data do fornecimento<input type="date" id="valeData" value="${esc(dt)}" max="${hoje}"></label>
+          <label>Data efetiva do fornecimento<input type="date" id="valeData" value="${esc(dt)}" max="${hoje}"></label>
           <label>Item
             <select id="valeItem">
               ${itens.length ? `<option value="">Todos os itens (um vale para cada)</option>` : '<option value="">Nenhum item fornecido nesta data</option>'}
@@ -1376,12 +1416,17 @@
       <section class="card">
         <h2>Vales gerados</h2>
         ${vales.length ? `<div class="tabela-wrap"><table>
-          <thead><tr><th>Data</th><th>Item</th><th>Setores</th><th class="num">Total fornecido</th><th>Gerado por</th><th></th></tr></thead>
-          <tbody>${vales.map(x => `<tr>
+          <thead><tr><th>Data efetiva</th><th>Item</th><th>Setores</th><th class="num">Total fornecido</th><th>Versão</th><th></th></tr></thead>
+          <tbody>${vales.map(x => { const m = mudancasDoVale(x); return `<tr>
             <td>${esc(fmtData(x.data))}</td><td><strong>${esc(x.itemNome || '—')}</strong></td><td>${esc((x.setoresNomes || []).join(', '))}</td>
-            <td class="num">${esc(qtdUn(x.totalForn || 0, x.unidade))}</td><td>${esc(x.geradoPorNome || '—')}<div class="small muted">${fmtDataHora(x.atualizadoEm)}</div></td>
-            <td class="num"><button class="btn secundario pequeno" data-baixar-vale="${x.id}">Baixar PDF</button></td>
-          </tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nenhum vale gerado ainda.</p>'}
+            <td class="num">${esc(qtdUn(x.totalForn || 0, x.unidade))}</td>
+            <td>v${x.versao || 1} · ${esc(x.geradoPorNome || '—')}<div class="small muted">${fmtDataHora(x.atualizadoEm)}</div>
+              ${(x.versoesAnteriores || []).length ? `<div class="small muted">Versões anteriores: ${(x.versoesAnteriores || []).map(a => `v${a.versao || 1} (${fmtDataHora(a.atualizadoEm)})`).join(', ')}</div>` : ''}
+              ${m.mudou ? `<div class="alerta-vale">⚠ Nova movimentação retroativa${m.texto.length ? ': ' + esc(m.texto.join('; ')) : ''}.</div>` : ''}</td>
+            <td class="num">${m.mudou ? `<button class="btn primario pequeno" data-atualizar-vale="${x.id}">Gerar versão atualizada (v${(x.versao || 1) + 1})</button><div style="margin-top:.3rem"></div>` : ''}
+              <button class="btn secundario pequeno" data-baixar-vale="${x.id}">Baixar PDF${m.mudou || (x.versoesAnteriores || []).length ? ` v${x.versao || 1}` : ''}</button>
+              ${(x.versoesAnteriores || []).map((a, k) => `<div style="margin-top:.3rem"><button class="btn secundario pequeno" data-baixar-versao="${x.id}" data-k="${k}">PDF v${a.versao || 1}</button></div>`).join('')}</td>
+          </tr>`; }).join('')}</tbody></table></div>` : '<p class="muted">Nenhum vale gerado ainda.</p>'}
       </section>`;
       const erro = msg => { $('erroVale').textContent = msg; };
       const atual = () => [$('valeSetor').value, $('valeItem').value, $('valeCompl').value];
@@ -1403,6 +1448,18 @@
       alvo.querySelectorAll('[data-baixar-vale]').forEach(b => b.onclick = () => comBotao(b, async () => {
         const x = vales.find(y => y.id === b.dataset.baixarVale);
         try { await baixarValePDF([x]); } catch (e) { erro(e.message || msgErro(e)); }
+      }));
+      alvo.querySelectorAll('[data-baixar-versao]').forEach(b => b.onclick = () => comBotao(b, async () => {
+        const x = vales.find(y => y.id === b.dataset.baixarVersao), a = (x.versoesAnteriores || [])[+b.dataset.k];
+        try { await baixarValePDF([{ ...x, ...a, id: x.id }]); } catch (e) { erro(e.message || msgErro(e)); }
+      }));
+      alvo.querySelectorAll('[data-atualizar-vale]').forEach(b => b.onclick = () => comBotao(b, async () => {
+        const x = vales.find(y => y.id === b.dataset.atualizarVale);
+        try {
+          const novo = await registrarVale(montarVale(x.data, x.itemId, x.setorId || '', x.complementares || ''));
+          await baixarValePDF([novo]);
+          ctx.recarregar(`Versão atualizada (v${novo.versao}) do Vale de ${fmtData(x.data)} · ${x.itemNome} gerada. A versão anterior foi preservada.`);
+        } catch (e) { erro(e.message && !e.code ? e.message : 'Não foi possível gerar a versão atualizada: ' + msgErro(e)); }
       }));
     };
     conhecerFornecedores().finally(() => desenhar(alvo.dataset.valeData || hoje, '', '', ''));
@@ -1545,6 +1602,51 @@
     desenhar();
   }
 
+  /* ================= Data efetiva: dias retroativos (config/fornecimento) ================= */
+  const DIAS_RETROATIVOS_PADRAO = 7;
+  let configForn = { diasRetroativos: DIAS_RETROATIVOS_PADRAO };
+  async function carregarConfigForn() {
+    try {
+      const c = await getDoc(doc(db, 'config', 'fornecimento'));
+      const d = c.exists() ? c.data().diasRetroativos : null;
+      configForn = { diasRetroativos: Number.isInteger(d) && d >= 0 ? d : DIAS_RETROATIVOS_PADRAO };
+    } catch (e) { configForn = { diasRetroativos: DIAS_RETROATIVOS_PADRAO }; }
+  }
+  const somarDias = (iso, n) => { const [a, m, d] = iso.split('-').map(Number); const t = new Date(Date.UTC(a, m - 1, d + n)); return isoData(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate()); };
+  // Menor data efetiva aceita para o perfil atual ('' = sem limite: Administrador).
+  const menorDataEfetiva = () => perfil && perfil.perfil === 'admin' ? '' : somarDias(hojeISO(), -configForn.diasRetroativos);
+  function painelRetroativo(alvo, ctx) {
+    alvo.innerHTML = `<section class="card">
+      <h2>⏱ Lançamentos retroativos</h2>
+      <p class="muted small" style="margin-top:-.3rem">Quantos dias para trás o Paioleiro pode informar como <strong>data efetiva do fornecimento/baixa</strong>. O Administrador não tem esse limite. Datas futuras nunca são aceitas.</p>
+      <form id="fRetro" novalidate>
+        <div class="grade"><label>Paioleiro pode informar até (dias antes de hoje)<input id="inpDiasRetro" inputmode="numeric" value="${configForn.diasRetroativos}"></label></div>
+        <p class="small muted" style="margin-top:-.5rem">0 = somente a data de hoje. Padrão: ${DIAS_RETROATIVOS_PADRAO} dias.</p>
+        <div class="erro" id="erroRetro"></div>
+        <div class="acoes"><button class="btn primario" type="submit">Salvar</button></div>
+      </form></section>`;
+    $('fRetro').onsubmit = e => {
+      e.preventDefault();
+      const n = paraInteiro($('inpDiasRetro').value);
+      if (n == null || Number.isNaN(n) || n < 0 || n > 365) { $('erroRetro').textContent = 'Informe um número inteiro de 0 a 365.'; return; }
+      comBotao(e.submitter || alvo.querySelector('button[type=submit]'), async () => {
+        try {
+          await setDoc(doc(db, 'config', 'fornecimento'), { diasRetroativos: n, atualizadoEm: serverTimestamp(), atualizadoPorUid: perfil.uid, atualizadoPorNome: perfil.nome });
+          configForn = { diasRetroativos: n };
+          ctx.recarregar(`Lançamentos retroativos: o Paioleiro poderá informar até ${plural(n, 'dia', 'dias')} antes de hoje.`);
+        } catch (err) { $('erroRetro').textContent = 'Não foi possível salvar: ' + msgErro(err); }
+      });
+    };
+  }
+
+  // Janela de confirmação (cancelamento e correção da data efetiva).
+  function abrirModal(html) {
+    fecharModal();
+    document.body.insertAdjacentHTML('beforeend', `<div class="modal-fundo" id="modalPedido"><div class="modal" role="dialog" aria-modal="true">${html}</div></div>`);
+    document.body.classList.add('com-modal');
+  }
+  function fecharModal() { $('modalPedido')?.remove(); document.body.classList.remove('com-modal'); }
+
   /* ================= Paioleiro ================= */
   // Vê apenas solicitações autorizadas ("Pedido Recebido") e as já fornecidas,
   // e só pode marcar "Fornecido" (com baixa no estoque).
@@ -1616,6 +1718,7 @@
         lista('itens').catch(() => []), lista('vales').catch(() => [])
       ]);
       dados = { ...vazio(), modalidades: ordenarModalidades(modalidades), eventos, solicitacoes, itens, vales };
+      await carregarConfigForn();
     } catch (e) {
       return telaFalha('Paioleiro', e, () => telaPaioleiro());
     }
@@ -1676,21 +1779,23 @@
         <div class="rotulo">${rotulo}</div><div class="valor">${fmtQtd(soma(l))}</div>
         <div class="small ${destaque ? '' : 'muted'}" ${destaque ? 'style="color:var(--azul-200)"' : ''}>${plural(l.length, 'solicitação', 'solicitações')}</div></div>`;
 
+      const btnCancelar = s => paioleiro ? '' : `<div style="margin-top:.35rem"><button class="btn pequeno btn-cancelar" data-cancelar="${s.id}">✕ CANCELAR PEDIDO</button></div>`;
       const acoes = s => {
         const st = statusDe(s);
         if (st === 'pendente' && !paioleiro)
-          return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-receber="${s.id}">Pedido Recebido</button></div>`;
+          return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-receber="${s.id}">Pedido Recebido</button></div>${btnCancelar(s)}`;
         if (st === 'recebido')
-          return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-fornecer="${s.id}">FORNECER</button></div>`;
+          return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-fornecer="${s.id}">FORNECER</button></div>${btnCancelar(s)}`;
         if (st === 'fornecido')
-          return `<div style="margin-top:.35rem"><button class="btn secundario pequeno" disabled title="Esta solicitação já foi fornecida">✓ Fornecido</button></div>`;
+          return `<div style="margin-top:.35rem"><button class="btn secundario pequeno" disabled title="Esta solicitação já foi fornecida">✓ Fornecido</button></div>` +
+            (paioleiro ? '' : `<div style="margin-top:.35rem"><button class="btn secundario pequeno" data-corrigir-data="${s.id}">📅 Corrigir data efetiva</button></div>`);
         return '';
       };
 
       // Itens a preparar na data: soma dos itens das solicitações ainda não fornecidas.
       function itensAPreparar(l) {
         const tot = {};
-        l.filter(s => grupoDe(s) !== 'fornecidos').forEach(s => itensDaSolicitacao(s).forEach(i => {
+        l.filter(s => !['fornecidos', 'cancelados'].includes(grupoDe(s))).forEach(s => itensDaSolicitacao(s).forEach(i => {
           tot[i.nome] = tot[i.nome] || { q: 0, un: i.unidade };
           tot[i.nome].q += i.quantidade;
         }));
@@ -1715,7 +1820,7 @@
       function htmlCalendario() {
         const { ano, mes } = mesSol;
         const porDia = {};
-        todas.forEach(s => { const dt = dataDe(s); if (dt) (porDia[dt] = porDia[dt] || []).push(s); });
+        todas.filter(s => !cancelada(s)).forEach(s => { const dt = dataDe(s); if (dt) (porDia[dt] = porDia[dt] || []).push(s); });
         const ini = new Date(Date.UTC(ano, mes - 1, 1)).getUTCDay(), dias = new Date(Date.UTC(ano, mes, 0)).getUTCDate();
         let cel = '';
         for (let i = 0; i < ini; i++) cel += '<div class="cs-dia vazio"></div>';
@@ -1738,17 +1843,18 @@
           </div>
           <div class="cs-sem">${['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map(x => `<span>${x}</span>`).join('')}</div>
           <div class="cs-grade">${cel}</div>
-          <div class="cs-leg"><span><i class="com"></i>Com pedidos</span><span><i class="sel"></i>Selecionado</span><span><i></i>Sem pedidos</span><span><i class="pend"></i>${paioleiro ? 'A fornecer' : 'Pendente de recebimento'}</span></div>
+          <div class="cs-leg"><span><i class="com"></i>Com pedidos</span><span><i class="sel"></i>Selecionado</span><span><i></i>Sem pedidos</span><span><i class="pend"></i>${paioleiro ? 'A fornecer' : 'Pendente de recebimento'}</span>${paioleiro ? '' : '<span><i class="canc"></i>Cancelados aparecem na lista do dia</span>'}</div>
           <button type="button" class="btn secundario pequeno cs-lista" id="btnModoLista">Ver todas as datas em lista</button>
         </div>`;
       }
       function htmlDoDia() {
-        const doDia = todas.filter(s => dataDe(s) === diaSol);
+        const doDiaTodos = todas.filter(s => dataDe(s) === diaSol), doDia = doDiaTodos.filter(s => !cancelada(s));
+        const nCanc = doDiaTodos.length - doDia.length;
         const lista = visiveis.filter(s => dataDe(s) === diaSol).sort((x, y) => (modalidade(x.modalidadeId)?.nome || '').localeCompare(modalidade(y.modalidadeId)?.nome || ''));
         const cab = `<div class="cs-cab"><strong>📅 ${esc(fmtDataSemana(diaSol))}</strong>${diaSol === hoje ? ' <span class="status recebido">hoje</span>' : ''}
-          ${doDia.length ? `<span class="grupo-info">Retirada ${RETIRADA_TEXTO} · ${plural(doDia.length, 'pedido', 'pedidos')}${lista.length !== doDia.length ? ` · ${lista.length} neste filtro` : ''}</span>
+          ${doDiaTodos.length ? `<span class="grupo-info">Retirada ${RETIRADA_TEXTO} · ${plural(doDia.length, 'pedido', 'pedidos')}${nCanc ? ` · ${plural(nCanc, 'cancelado', 'cancelados')}` : ''}${lista.length !== doDiaTodos.length ? ` · ${lista.length} neste filtro` : ''}</span>
           <div class="grupo-itens">Itens a preparar: ${itensAPreparar(doDia)}</div>` : ''}</div>`;
-        if (!doDia.length) {
+        if (!doDiaTodos.length) {
           const prox = datas.filter(dt => dt > diaSol).sort()[0], ant = datas.filter(dt => dt < diaSol).sort().pop();
           const ir = prox || ant;
           return cab + `<div class="cs-vazio"><strong>Não há pedidos para esta data.</strong>${ir ? `<div class="small" style="margin-top:.4rem">${prox ? 'Próxima' : 'Última'} data com pedidos: <button type="button" class="cs-link" data-ir-dia="${ir}">${esc(fmtData(ir))} ${prox ? '→' : '←'}</button></div>` : ''}</div>`;
@@ -1769,7 +1875,7 @@
       const filtrosHtml = `<div class="filtros">
           ${(paioleiro
             ? [['recebidos', 'A fornecer'], ['fornecidos', 'Fornecidos'], ['todas', 'Todas']]
-            : [['todas', 'Todas'], ['pendentes', 'Pendentes'], ['recebidos', 'Pedido Recebido'], ['fornecidos', 'Fornecidos']]).map(([k, t]) =>
+            : [['todas', 'Todas'], ['pendentes', 'Pendentes'], ['recebidos', 'Pedido Recebido'], ['fornecidos', 'Fornecidos'], ['cancelados', 'Cancelados']]).map(([k, t]) =>
             `<button data-filtro="${k}" class="${filtroSolicitacoes === k ? 'ativo' : ''}">${t}</button>`).join('')}
         </div>
         <div class="erro" id="erroAtend"></div>
@@ -1782,7 +1888,7 @@
       <div class="indicadores">
         ${paioleiro
           ? indicador('Pedidos a fornecer', rec, true) + indicador('Pedidos fornecidos', forn)
-          : indicador('Pedidos pendentes', pend, true) + indicador('Pedidos recebidos', rec) + indicador('Pedidos fornecidos', forn) + indicador('Total de pedidos', naData)}
+          : indicador('Pedidos pendentes', pend, true) + indicador('Pedidos recebidos', rec) + indicador('Pedidos fornecidos', forn) + indicador('Total de pedidos', naData.filter(s => !cancelada(s)))}
       </div>
       ${noCalendario ? `<section class="card">
         <h2>${paioleiro ? 'Solicitações autorizadas' : 'Solicitações'}</h2>
@@ -1905,6 +2011,91 @@
         });
       });
 
+      // ---- Cancelar pedido (somente Administrador; antes do fornecimento) ----
+      p.querySelectorAll('[data-cancelar]').forEach(b => b.onclick = () => {
+        const s = dados.solicitacoes.find(x => x.id === b.dataset.cancelar);
+        if (statusDe(s) === 'fornecido' || statusDe(s) === 'atendido') return erro('Não é possível cancelar este pedido, pois o fornecimento já foi realizado.');
+        abrirModal(`<h3 class="modal-titulo perigo">✕ Cancelar pedido</h3>
+          <p style="margin:.2rem 0 .4rem;font-weight:600">Deseja realmente cancelar este pedido? Essa ação ficará registrada no histórico do sistema.</p>
+          <dl class="resumo"><dt>Pedido</dt><dd>${esc(numeroPedido(s))}</dd><dt>Setor</dt><dd>${esc(nomeSetor(s.modalidadeId))}</dd>
+            <dt>Data de retirada</dt><dd>${esc(fmtDataSemana(dataDe(s)))}</dd><dt>Itens</dt><dd>${itensDaSolicitacao(s).map(i => `${esc(i.nome)}: ${esc(qtdUn(i.quantidade, i.unidade))}`).join('<br>')}</dd>
+            <dt>Status atual</dt><dd>${seloStatus(s)}</dd></dl>
+          <p class="small muted" style="margin-top:-.4rem">O registro não será excluído e o estoque não será alterado.</p>
+          <div class="erro" id="erroModal"></div>
+          <div class="acoes modal-acoes"><button class="btn secundario" id="btnModalVoltar">Voltar</button><button class="btn perigo-cheio" id="btnModalConfirmar">Confirmar cancelamento</button></div>`);
+        $('btnModalVoltar').onclick = fecharModal;
+        $('btnModalConfirmar').onclick = () => comBotao($('btnModalConfirmar'), async () => {
+          const em = msg => { $('erroModal').textContent = msg; };
+          const ref = doc(db, 'solicitacoes', s.id);
+          try {
+            const snap = await getDoc(ref);
+            if (!snap.exists()) return em('Pedido não encontrado.');
+            const atual = { id: snap.id, ...snap.data() }, st = statusDe(atual);
+            if (st === 'fornecido' || st === 'atendido') return em('Não é possível cancelar este pedido, pois o fornecimento já foi realizado.');
+            if (st === 'cancelado') return em('Este pedido já foi cancelado.');
+            const lote = writeBatch(db);
+            lote.update(ref, { status: 'cancelado', statusAnterior: st, canceladoEm: serverTimestamp(), canceladoPorUid: perfil.uid, canceladoPorNome: perfil.nome });
+            lote.set(doc(db, 'auditoriaPedidos', `${s.id}_cancelamento`), {
+              tipo: 'cancelamento', solicitacaoId: s.id, setorId: atual.modalidadeId, setorNome: nomeSetor(atual.modalidadeId),
+              dataRetirada: dataDe(atual), statusAnterior: st, statusNovo: 'cancelado',
+              em: serverTimestamp(), porUid: perfil.uid, porNome: perfil.nome
+            });
+            await lote.commit();
+            fecharModal();
+            ctxSol.recarregar(`Pedido ${numeroPedido(s)} de ${nomeSetor(s.modalidadeId)} (${fmtData(dataDe(s))}) cancelado. O registro foi mantido e o cancelamento ficou no histórico. Nenhuma alteração no estoque.`);
+          } catch (e) {
+            try {
+              const d2 = await getDoc(ref);
+              if (d2.exists() && statusDe(d2.data()) === 'cancelado') { fecharModal(); return ctxSol.recarregar('Pedido cancelado.'); }
+              if (d2.exists() && ['fornecido', 'atendido'].includes(statusDe(d2.data()))) return em('Não é possível cancelar este pedido, pois o fornecimento já foi realizado.');
+            } catch (_) { /* sem conexão */ }
+            em(e.code === 'permission-denied' ? 'Não foi possível cancelar: o pedido foi alterado ou você não tem permissão. Clique em Atualizar.' : msgErro(e));
+          }
+        });
+      });
+
+      // ---- Corrigir data efetiva (somente Administrador; pedido já fornecido) ----
+      p.querySelectorAll('[data-corrigir-data]').forEach(b => b.onclick = () => {
+        const s = dados.solicitacoes.find(x => x.id === b.dataset.corrigirData);
+        const atualDE = dataEfetivaDe(s);
+        const temVale = (dados.vales || []).some(v => v.data === atualDE && idsDoVale(v).split(',').includes(s.id));
+        abrirModal(`<h3 class="modal-titulo">📅 Corrigir data efetiva do fornecimento</h3>
+          <p class="small muted" style="margin-top:0">Somente Administrador. Não altera quantidades nem o estoque: muda apenas o dia da baixa e do Vale. Fica registrado na auditoria.</p>
+          <dl class="resumo"><dt>Pedido</dt><dd>${esc(numeroPedido(s))} · ${esc(nomeSetor(s.modalidadeId))} · retirada ${esc(fmtData(dataDe(s)))}</dd>
+            <dt>Data efetiva atual</dt><dd>${esc(fmtData(atualDE))}</dd><dt>Lançado</dt><dd>${fmtDataHora(s.fornecidoEm)} por ${esc(s.fornecidoPorNome || '—')}</dd></dl>
+          <label>Nova data efetiva<input type="date" id="inpNovaDataEf" value="${esc(atualDE)}" max="${hojeISO()}"></label>
+          <label>Motivo da correção (obrigatório)<input id="inpMotivoDataEf" maxlength="300" placeholder="Ex.: material entregue no dia anterior"></label>
+          ${temVale ? `<div class="alerta-vale">O Vale de ${esc(fmtData(atualDE))} com este fornecimento já foi gerado: após a correção ele ficará marcado para gerar uma versão atualizada.</div>` : ''}
+          <div class="erro" id="erroModal" style="margin-top:.6rem"></div>
+          <div class="acoes modal-acoes"><button class="btn secundario" id="btnModalVoltar">Voltar</button><button class="btn primario" id="btnModalConfirmar">Salvar correção</button></div>`);
+        $('btnModalVoltar').onclick = fecharModal;
+        $('btnModalConfirmar').onclick = () => comBotao($('btnModalConfirmar'), async () => {
+          const em = msg => { $('erroModal').textContent = msg; };
+          const nova = $('inpNovaDataEf').value, motivo = $('inpMotivoDataEf').value.trim().slice(0, 300);
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(nova || '')) return em('Informe a nova data efetiva.');
+          if (nova > hojeISO()) return em('A data efetiva não pode ser futura.');
+          if (nova === atualDE) return em('A nova data é igual à data efetiva atual.');
+          if (motivo.length < 3) return em('Informe o motivo da correção.');
+          const ref = doc(db, 'solicitacoes', s.id);
+          try {
+            const snap = await getDoc(ref);
+            const atual = snap.data();
+            if (statusDe(atual) !== 'fornecido') return em('Somente pedidos fornecidos têm data efetiva para corrigir.');
+            const n = (atual.correcoesDataEfetiva || 0) + 1;
+            const lote = writeBatch(db);
+            lote.update(ref, { dataEfetiva: nova, correcoesDataEfetiva: n, dataEfetivaCorrigidaEm: serverTimestamp(), dataEfetivaCorrigidaPorUid: perfil.uid, dataEfetivaCorrigidaPorNome: perfil.nome });
+            lote.set(doc(db, 'auditoriaPedidos', `${s.id}_data_${n}`), {
+              tipo: 'correcao_data_efetiva', solicitacaoId: s.id, setorId: atual.modalidadeId, setorNome: nomeSetor(atual.modalidadeId),
+              dataAnterior: dataEfetivaDe({ id: s.id, ...atual }), dataNova: nova, motivo,
+              em: serverTimestamp(), porUid: perfil.uid, porNome: perfil.nome
+            });
+            await lote.commit();
+            fecharModal();
+            ctxSol.recarregar(`Data efetiva corrigida de ${fmtData(atualDE)} para ${fmtData(nova)}. Estoque e quantidades não foram alterados.`);
+          } catch (e) { em(e.code === 'permission-denied' ? 'Não foi possível corrigir: o pedido foi alterado ou você não tem permissão. Clique em Atualizar.' : msgErro(e)); }
+        });
+      });
+
       // ---- Fornecido (tela de fornecimento; baixa no estoque, uma única vez) ----
       p.querySelectorAll('[data-fornecer]').forEach(b => b.onclick = () => {
         const s = dados.solicitacoes.find(x => x.id === b.dataset.fornecer);
@@ -1938,9 +2129,14 @@
           <h3 style="font-size:1rem;margin-top:1.1rem">Registro de Alterações na Quantidade</h3>
           <div id="previaRegistro"></div>` : `
           <p class="muted small">Esta solicitação é anterior ao fornecimento com ajuste de quantidade: o estoque já foi baixado na época e não será baixado novamente.</p>`}
+          <div class="data-efetiva">
+            <label>📅 Data efetiva do fornecimento/baixa<input type="date" id="inpDataEfetiva" value="${hojeISO()}" max="${hojeISO()}" ${menorDataEfetiva() ? `min="${menorDataEfetiva()}"` : ''}></label>
+            <div class="small muted">Dia em que o material foi realmente entregue. Padrão: hoje. ${menorDataEfetiva() ? `Pode ser anterior a hoje (até ${plural(configForn.diasRetroativos, 'dia', 'dias')})` : 'Pode ser anterior a hoje'}, nunca futura.</div>
+            <div id="avisoDataEfetiva"></div>
+          </div>
           <div class="erro" id="erroFornec" style="margin-top:.8rem"></div>
           <div class="acoes">
-            <button class="btn primario" id="btnConfirmarFornec">Confirmar fornecimento</button>
+            <button class="btn primario" id="btnConfirmarFornec">Confirmar fornecimento em ${esc(fmtData(hojeISO()))}</button>
             <button class="btn secundario" id="btnCancelarFornec">Cancelar</button>
           </div>
         </section>`);
@@ -1973,15 +2169,39 @@
           document.querySelectorAll('#secFornec [data-forn], #secFornec [data-just]').forEach(inp => inp.oninput = atualizarPrevia);
           atualizarPrevia();
         }
+        // Data efetiva: validação e resumo das datas antes de confirmar.
+        function lerDataEfetiva() {
+          const v = $('inpDataEfetiva').value, hoje = hojeISO(), min = menorDataEfetiva();
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(v || '')) return { erro: 'Informe a data efetiva do fornecimento/baixa.' };
+          if (v > hoje) return { erro: 'A data efetiva não pode ser futura.' };
+          if (min && v < min) return { erro: `A data efetiva pode ser no máximo ${plural(configForn.diasRetroativos, 'dia', 'dias')} antes de hoje (a partir de ${fmtData(min)}). Para datas anteriores, procure o Administrador.` };
+          return { data: v };
+        }
+        function atualizarDataEfetiva() {
+          const r = lerDataEfetiva(), alvoAviso = $('avisoDataEfetiva');
+          if (r.erro) { alvoAviso.innerHTML = `<div class="erro" style="margin:.5rem 0 0">${esc(r.erro)}</div>`; $('btnConfirmarFornec').textContent = 'Confirmar fornecimento'; return; }
+          const retro = r.data !== hojeISO();
+          alvoAviso.innerHTML = `${retro ? `<div class="aviso-retro">⚠ <strong>Lançamento retroativo.</strong> A baixa no estoque e o Vale de Gêneros serão do dia <strong>${esc(fmtData(r.data))}</strong>.</div>` : ''}
+            <dl class="resumo-datas"><dt>Data efetiva (baixa e Vale)</dt><dd>${esc(fmtDataSemana(r.data))}</dd>
+            <dt>Lançamento no sistema</dt><dd>hoje, ${esc(fmtData(hojeISO()))}, no momento da confirmação</dd>
+            <dt>Data de retirada solicitada</dt><dd>${esc(fmtData(dataDe(s)))} (não muda)</dd></dl>`;
+          $('btnConfirmarFornec').textContent = `Confirmar fornecimento em ${fmtData(r.data)}`;
+        }
+        $('inpDataEfetiva').oninput = $('inpDataEfetiva').onchange = atualizarDataEfetiva;
+        atualizarDataEfetiva();
 
         $('btnConfirmarFornec').onclick = () => {
           const leitura = comBaixa ? lerFornecimento() : { fornecidos: {}, alteracoes: {}, erros: [] };
           if (leitura.erros.length) return erroF(leitura.erros.join('\n'));
+          const de = lerDataEfetiva();
+          if (de.erro) return erroF(de.erro);
+          leitura.dataEfetiva = de.data;
           const linhas = lista.map(i => {
             const f = leitura.fornecidos[i.id];
             return `• ${i.nome}: fornecido ${qtdUn(f, i.unidade)}${maior(i.quantidade, f) ? ` (aprovado ${qtdUn(i.quantidade, i.unidade)}; redução de ${qtdUn(i.quantidade - f, i.unidade)})` : ''}`;
           }).join('\n');
-          const texto = `Confirmar que este pedido foi FORNECIDO ao responsável?\n\n${resumoTexto(s)}\n\n` +
+          const texto = `Confirmar que este pedido foi FORNECIDO ao responsável?\n\n${resumoTexto(s)}\n` +
+            `Data efetiva do fornecimento/baixa: ${fmtDataSemana(leitura.dataEfetiva)}${leitura.dataEfetiva !== hojeISO() ? ' (lançamento retroativo)' : ''}\n\n` +
             (comBaixa ? `Serão descontados do estoque:\n${linhas}\n\nEsta ação não pode ser desfeita.`
                       : 'O estoque já foi baixado anteriormente e não será baixado novamente.');
           if (!window.confirm(texto)) return;
@@ -1997,6 +2217,7 @@
               const atualSnap = await getDoc(solRef);
               const atual = { id: atualSnap.id, ...atualSnap.data() };
               if (statusDe(atual) === 'fornecido') return ctxSol.recarregar('Esta solicitação já estava marcada como Fornecido. Nenhuma nova baixa foi feita.');
+              if (statusDe(atual) === 'cancelado') return erroF('Este pedido foi cancelado pelo Administrador e não pode ser fornecido.');
               if (statusDe(atual) !== 'recebido') return erroF('Esta solicitação precisa estar como "Pedido Recebido" antes de ser marcada como Fornecido.');
 
               const lote = writeBatch(db);
@@ -2004,7 +2225,8 @@
                 status: 'fornecido',
                 fornecidoEm: serverTimestamp(),
                 fornecidoPorUid: perfil.uid,
-                fornecidoPorNome: perfil.nome
+                fornecidoPorNome: perfil.nome,
+                dataEfetiva: leitura.dataEfetiva
               };
               if (baixaNoFornecimento(atual)) {
                 const itensAtuais = itensDaSolicitacao(atual);
@@ -2031,9 +2253,10 @@
               }
               lote.update(solRef, dadosFornec);
               await lote.commit();
-              ctxSol.recarregar(baixaNoFornecimento(atual)
+              const quando = leitura.dataEfetiva !== hojeISO() ? ` Data efetiva: ${fmtData(leitura.dataEfetiva)} (lançamento retroativo).` : '';
+              ctxSol.recarregar((baixaNoFornecimento(atual)
                 ? 'Solicitação marcada como Fornecido e baixa realizada no estoque pela quantidade fornecida.'
-                : 'Solicitação marcada como Fornecido.');
+                : 'Solicitação marcada como Fornecido.') + quando);
             } catch (err) {
               // Se a gravação chegou ao servidor e só a resposta se perdeu, não repete.
               try {
@@ -2137,7 +2360,7 @@
           quantidade: m.quantidade, unidade: unidadeDoItem(m.itemId), origem: m.porNome || '—', saida: false
         })),
         ...dados.solicitacoes.filter(estoqueBaixado).flatMap(s => itensDaSolicitacao(s).map(i => ({
-          quando: dataDaBaixa(s), itemNome: i.nome, tipo: 'Saída', quantidade: qtdFornecida(s, i), unidade: i.unidade,
+          quando: dataDaBaixa(s), efetiva: baixaNoFornecimento(s) ? dataEfetivaDe(s) : '', itemNome: i.nome, tipo: 'Saída', quantidade: qtdFornecida(s, i), unidade: i.unidade,
           origem: `Fornecido · ${nomeSetor(s.modalidadeId)}${s.fornecidoPorNome ? ' · por ' + s.fornecidoPorNome : ''}` +
             (Math.abs(qtdFornecida(s, i) - i.quantidade) > EPS ? ` · aprovado ${qtdUn(i.quantidade, i.unidade)}, reduzido em ${qtdUn(i.quantidade - qtdFornecida(s, i), i.unidade)}` : ''),
           saida: true
@@ -2206,7 +2429,7 @@
           <thead><tr><th style="width:2.2rem"></th><th>Data</th><th>Item</th><th>Tipo</th><th class="num">Quantidade</th><th>Origem</th></tr></thead>
           <tbody>${movs.map(m => `<tr>
             <td>${m.id ? `<input type="checkbox" class="caixa" data-sel-mov="${m.id}" aria-label="Selecionar movimentação">` : ''}</td>
-            <td>${fmtDataHora(m.quando)}</td><td>${esc(m.itemNome)}</td><td>${m.tipo}</td>
+            <td>${m.efetiva ? `${esc(fmtData(m.efetiva))}<div class="small muted">efetiva · lançado ${fmtDataHora(m.quando)}</div>` : fmtDataHora(m.quando)}</td><td>${esc(m.itemNome)}</td><td>${m.tipo}</td>
             <td class="num">${m.saida ? '−' : '+'}${esc(qtdUn(m.quantidade, m.unidade))}</td><td>${esc(m.origem)}</td>
           </tr>`).join('')}</tbody></table></div>
           <div class="acoes" style="margin-top:.6rem"><button class="btn perigo pequeno" id="btnExcluirMov" hidden>Excluir histórico</button></div>` : '<p class="muted">Nenhuma movimentação registrada.</p>'}
@@ -2347,7 +2570,8 @@
     /* ---- Vales de Gêneros (CN-42) ---- */
     vales(p) {
       const ctx = { recarregar: msg => telaAdmin('vales', msg, true) };
-      p.innerHTML = '<div id="valeGerar"></div><div id="valeAssinaturas"></div>';
+      p.innerHTML = '<div id="valeRetro"></div><div id="valeGerar"></div><div id="valeAssinaturas"></div>';
+      painelRetroativo($('valeRetro'), ctx);
       painelVales($('valeGerar'), ctx);
       painelAssinaturas($('valeAssinaturas'), ctx);
     },
