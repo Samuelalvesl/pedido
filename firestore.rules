@@ -511,7 +511,7 @@ service cloud.firestore {
       return n.get('versao', 1) == a.get('versao', 1) + 1
         && n.versoesAnteriores is list
         && n.versoesAnteriores.size() == ant.size() + 1
-        && n.versoesAnteriores[0:ant.size()] == ant;
+        && (ant.size() == 0 || n.versoesAnteriores[0:ant.size()] == ant);
     }
     match /vales/{valeId} {
       allow read: if ehGeradorDeVale();
@@ -616,9 +616,62 @@ service cloud.firestore {
 
     // Setores (coleção "modalidades"; inclui o limite de pedidos). Criar, editar e
     // excluir: somente o Administrador. A exclusão é registrada no Histórico de Exclusões.
+    // Quantidade de setores: sem limite. Cada nome fica reservado em setoresNomes/{chave},
+    // onde chave = nome em minúsculas (com "/" trocado por "_"); como a reserva só pode ser
+    // criada (nunca sobrescrita), dois setores não podem ter o mesmo nome.
+    function chaveSetor(nome) {
+      return nome.lower().replace('/', '_');
+    }
+    function caminhoReserva(nome) {
+      return /databases/$(database)/documents/setoresNomes/$(chaveSetor(nome));
+    }
+    // Nome sem espaços nas pontas nem espaços repetidos, com até 60 caracteres.
+    function nomeSetorValido(nome) {
+      return nome is string && nome.size() >= 1 && nome.size() <= 60
+        && nome.matches('^\\S(.*\\S)?$') && !nome.matches('.*\\s\\s.*');
+    }
+    function reservaDoSetor(id, nome) {
+      return existsAfter(caminhoReserva(nome))
+        && getAfter(caminhoReserva(nome)).data.modalidadeId == id;
+    }
+    // Cadastro ("+ NOVO SETOR"): registra quando e qual Administrador cadastrou.
+    function setorNovoValido(id, d) {
+      return d.keys().hasOnly(['nome', 'limite', 'limiteDiario', 'ordem', 'criadoEm', 'criadoPorUid', 'criadoPorNome'])
+        && nomeSetorValido(d.nome)
+        && (d.limite == null || (d.limite is number && d.limite >= 0))
+        && d.limiteDiario is int && d.limiteDiario >= 1
+        && d.ordem is int
+        && d.criadoEm == request.time
+        && d.criadoPorUid == request.auth.uid
+        && d.criadoPorNome == meuPerfil().nome
+        && reservaDoSetor(id, d.nome);
+    }
+    // Edição: o registro do cadastro não muda; um novo nome precisa da sua reserva.
+    function setorEditadoValido(id, n, a) {
+      return !n.diff(a).affectedKeys().hasAny(['criadoEm', 'criadoPorUid', 'criadoPorNome'])
+        && (n.nome == a.nome
+            || (nomeSetorValido(n.nome)
+                && (chaveSetor(n.nome) == chaveSetor(a.nome) || reservaDoSetor(id, n.nome))));
+    }
     match /modalidades/{id} {
       allow read: if ehAdmin() || ehPaioleiro() || (ehResponsavel() && minhaModalidade() == id);
-      allow write: if ehAdmin();
+      allow create: if ehAdmin() && setorNovoValido(id, request.resource.data);
+      allow update: if ehAdmin() && setorEditadoValido(id, request.resource.data, resource.data);
+      allow delete: if ehAdmin();
+    }
+    match /setoresNomes/{chave} {
+      allow read: if ehAdmin();
+      // Só cria a reserva do nome atual do próprio setor (nunca sobrescreve outra).
+      allow create: if ehAdmin()
+        && request.resource.data.keys().hasOnly(['modalidadeId'])
+        && request.resource.data.modalidadeId is string
+        && existsAfter(/databases/$(database)/documents/modalidades/$(request.resource.data.modalidadeId))
+        && chaveSetor(getAfter(/databases/$(database)/documents/modalidades/$(request.resource.data.modalidadeId)).data.nome) == chave;
+      allow update: if false;
+      // Liberada quando o setor é excluído ou passa a ter outro nome.
+      allow delete: if ehAdmin()
+        && (!existsAfter(/databases/$(database)/documents/modalidades/$(resource.data.modalidadeId))
+            || chaveSetor(getAfter(/databases/$(database)/documents/modalidades/$(resource.data.modalidadeId)).data.nome) != chave);
     }
 
     // Eventos: substituídos pelo calendário. Mantidos apenas para consulta das
