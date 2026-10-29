@@ -480,3 +480,32 @@ body.com-modal{overflow:hidden}
 @media (max-width:480px){.resumo-datas{grid-template-columns:1fr;gap:0}.resumo-datas dd{margin-bottom:.35rem}}
 .selo-retro{display:inline-block;background:#fff3dc;color:#8a5300;border:1px solid #f3d29a;border-radius:99px;padding:.05rem .5rem;font-size:.72rem;font-weight:700}
 .alerta-vale{background:#fff6e6;border:1px solid #f3d29a;border-radius:8px;padding:.5rem .7rem;font-size:.85rem;color:#7a4b00;margin-top:.3rem}
+
+/* ---------- Setores: "+ NOVO SETOR", cadastro, busca ---------- */
+.setor-topo{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;justify-content:space-between;margin-bottom:.9rem}
+.setor-topo .contagem{color:var(--azul-800);font-weight:600}
+.setor-busca{max-width:320px;margin:0}
+.btn-novo-setor{font-weight:800;letter-spacing:.02em}
+#painel > .card.form-setor{grid-column:1/-1}
+.form-setor{border-top-color:var(--azul-600);background:linear-gradient(180deg,var(--azul-50),var(--branco) 120px)}
+.form-setor fieldset{border:1px solid var(--azul-200);border-radius:10px;padding:.8rem .9rem .2rem;margin:0 0 1rem;min-width:0}
+.form-setor legend{font-weight:700;color:var(--azul-900);padding:0 .3rem}
+.grade-3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.opcoes-resp{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.9rem}
+.opcoes-resp label{display:flex;align-items:center;gap:.45rem;margin:0;border:1px solid var(--azul-200);border-radius:999px;padding:.45rem .8rem;background:var(--branco);font-weight:600;cursor:pointer}
+.opcoes-resp label.marcada{background:var(--azul-100);border-color:var(--azul-600);color:var(--azul-800)}
+.opcoes-resp input{width:auto;margin:0}
+.obrig{color:var(--erro)}
+.dica{font-weight:400;color:#5b6475;font-size:.8rem;display:block;margin-top:.2rem}
+input.invalido,select.invalido{border-color:var(--erro);outline-color:var(--erro)}
+.setor-criado{margin-top:.25rem;font-size:.75rem}
+tr.setor-novo td{background:#eefaf1}
+.selo-novo{display:inline-block;background:#1a7f37;color:#fff;font-size:.7rem;font-weight:800;padding:.1rem .45rem;border-radius:999px;margin:.25rem 0 0;vertical-align:middle}
+tr[hidden]{display:none!important}
+@media (max-width:759px){
+  .setor-topo{flex-direction:column;align-items:stretch}
+  .setor-busca{max-width:none}
+  .btn-novo-setor{width:100%}
+  .opcoes-resp{flex-direction:column}
+  .opcoes-resp label{border-radius:10px}
+}
