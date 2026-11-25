@@ -121,6 +121,27 @@
     if (!dt || dt < hojeISO()) return 'passada';
     return Date.now() >= prazoDaData(dt) ? 'encerrada' : 'aberta';
   }
+  // ---------- Permissões individuais (definidas pelo Administrador em "Gerenciar Permissões") ----------
+  // Para criar uma nova permissão: acrescente-a aqui e na lista PERMISSOES() das regras do Firestore.
+  const PERMISSOES = [
+    { id: 'qualquerHorario', titulo: 'Realizar pedidos em qualquer horário', curto: 'Qualquer horário',
+      descricao: 'Pode solicitar mesmo depois das 9h30 (até 23h59 do dia da retirada). Continua respeitando os limites de quantidade por item e os limites diários do setor.' },
+    { id: 'aprovacaoAutomatica', titulo: 'Aprovação automática dos pedidos', curto: 'Aprovação automática',
+      descricao: 'A solicitação já entra como “Pedido Recebido”, sem confirmação manual do Administrador. O estoque só baixa no FORNECER.' },
+    { id: 'retiradaAteUmDia', titulo: 'Retirada de até 1 dia após a solicitação', curto: 'Retirada até D+1',
+      descricao: 'Só pode escolher como retirada o dia da solicitação ou o dia seguinte (horário de Brasília). Datas posteriores ficam bloqueadas.' }
+  ];
+  const permissoesDe = u => { const p = (u && u.permissoes) || {}; return Object.fromEntries(PERMISSOES.map(x => [x.id, p[x.id] === true])); };
+  const temPermissao = (u, id) => permissoesDe(u)[id];
+  const amanhaISO = () => { const [a, m, d] = hojeISO().split('-').map(Number); const t = new Date(Date.UTC(a, m - 1, d + 1)); return isoData(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate()); };
+  // Situação de uma data para o Responsável logado, considerando as permissões dele:
+  // 'passada' | 'encerrada' (passou das 9h30) | 'foraPermissao' (depois de amanhã, com a permissão 3) | 'aberta'.
+  function situacaoParaMim(dt) {
+    if (!dt || dt < hojeISO()) return 'passada';
+    if (temPermissao(perfil, 'retiradaAteUmDia') && dt > amanhaISO()) return 'foraPermissao';
+    if (temPermissao(perfil, 'qualquerHorario')) return 'aberta';   // datas de hoje em diante, a qualquer hora
+    return Date.now() >= prazoDaData(dt) ? 'encerrada' : 'aberta';
+  }
   function fmtDataSemana(dt) {
     if (!dt) return '—';
     const [a, m, d] = dt.split('-').map(Number);
@@ -427,6 +448,17 @@
   }
   const msgPrazoEncerrado = dt => `O prazo para solicitar para ${fmtData(dt)} encerrou às ${PRAZO_TEXTO} (horário de Brasília). Não é mais possível solicitar para esta data.`;
   const MSG_DATA_PASSADA = 'Não é possível solicitar para datas anteriores a hoje.';
+  const msgForaPermissao = () => `Seu acesso permite retirada somente até 1 dia após a solicitação: hoje (${fmtData(hojeISO())}) ou amanhã (${fmtData(amanhaISO())}).`;
+  const msgSituacao = (sit, dt) => sit === 'passada' ? MSG_DATA_PASSADA : sit === 'foraPermissao' ? msgForaPermissao() : msgPrazoEncerrado(dt);
+  // Aviso exibido ao Responsável que tem permissões especiais.
+  function avisoPermissoes() {
+    const p = permissoesDe(perfil), partes = [];
+    if (p.qualquerHorario) partes.push(`você pode solicitar <strong>em qualquer horário</strong> (sem o limite das ${PRAZO_TEXTO})`);
+    if (p.aprovacaoAutomatica) partes.push('seus pedidos entram <strong>já como “Pedido Recebido”</strong> (aprovação automática)');
+    if (p.retiradaAteUmDia) partes.push('a retirada deve ser <strong>hoje ou amanhã</strong> (até 1 dia após a solicitação)');
+    if (!partes.length) return '';
+    return `<div class="aviso-perm">🔐 <strong>Permissões especiais do seu acesso:</strong> ${partes.join('; ')}. Os limites de quantidade e de pedidos por dia continuam valendo.</div>`;
+  }
   // ---------- Limite de pedidos por dia (por setor) ----------
   // Cada setor tem seu "Limite de pedidos por dia" (padrão: 1). A contagem é por data
   // de retirada e fica no documento contadores/{setor}_{data}; cada nova solicitação
@@ -466,11 +498,12 @@
     for (let i = 0; i < primeiroDiaSemana; i++) celulas += '<div class="dia vazio"></div>';
     for (let dia = 1; dia <= diasNoMes; dia++) {
       const dt = isoData(ano, mes, dia);
-      const sit = situacaoData(dt);
+      const sit = situacaoParaMim(dt);
       const usados = usadosNaData(dt);
       const cheio = usados >= limite;
-      const classes = ['dia', sit, dt === hoje ? 'hoje' : '', cheio ? 'solicitado' : usados ? 'parcial' : '', dt === dataSelecionada ? 'selecionado' : ''].join(' ');
+      const classes = ['dia', sit === 'foraPermissao' ? 'encerrada fora-perm' : sit, dt === hoje ? 'hoje' : '', cheio ? 'solicitado' : usados ? 'parcial' : '', dt === dataSelecionada ? 'selecionado' : ''].join(' ');
       const titulo = sit === 'passada' ? 'Data anterior a hoje'
+        : sit === 'foraPermissao' ? 'Fora do limite de retirada (até 1 dia após a solicitação)'
         : sit === 'encerrada' ? `Prazo encerrado (${PRAZO_TEXTO})`
         : cheio ? `Limite diário atingido (${usados}/${limite} pedidos)` : usados ? `${usados} de ${limite} pedidos feitos` : 'Disponível';
       celulas += `<button type="button" class="${classes}" data-dia="${dt}" ${sit === 'passada' ? 'disabled' : ''} title="${titulo}" aria-label="${fmtData(dt)}: ${titulo}">
@@ -481,6 +514,7 @@
     $('secCalendario').innerHTML = `
       <h2>Escolha a data da retirada</h2>
       <p class="muted small" style="margin-top:-.3rem">Solicitações até as <strong>${PRAZO_TEXTO} do próprio dia</strong> da retirada (horário de Brasília). Retirada sempre das <strong>${RETIRADA_TEXTO}</strong>. Limites do seu setor por data: <strong>${plural(limiteDia(mod), 'pedido', 'pedidos')}</strong> e <strong>até ${mod.limite != null ? fmtQtd(mod.limite) : '—'} de cada item</strong> (soma dos pedidos da data).</p>
+      ${avisoPermissoes()}
       <div class="calendario">
         <div class="cal-topo">
           <button type="button" class="btn secundario pequeno" id="calAnt" ${mesAtual ? 'disabled' : ''} aria-label="Mês anterior">‹</button>
@@ -502,9 +536,9 @@
     $('calProx').onclick = () => { mesCalendario = mes === 12 ? { ano: ano + 1, mes: 1 } : { ano, mes: mes + 1 }; desenharCalendario(mod); };
     document.querySelectorAll('[data-dia]').forEach(b => b.onclick = () => {
       const dt = b.dataset.dia;
-      const sit = situacaoData(dt);
+      const sit = situacaoParaMim(dt);
       if (sit === 'passada') return desenharCalendario(mod, MSG_DATA_PASSADA);
-      if (sit === 'encerrada') { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, msgPrazoEncerrado(dt)); }
+      if (sit !== 'aberta') { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, msgSituacao(sit, dt)); }
       if (restantesNaData(mod, dt) <= 0) { dataSelecionada = null; $('secSolicitacao').hidden = true; return desenharCalendario(mod, msgLimiteDiario(mod, dt)); }
       dataSelecionada = dt;
       desenharCalendario(mod);
@@ -520,9 +554,8 @@
   function validarSolicitacao(mod, d, catalogo, jaPorItem = () => 0, admin = false) {
     const erros = [], itens = [];
     if (!admin) {
-      const sit = situacaoData(d.data);
-      if (sit === 'passada') erros.push(MSG_DATA_PASSADA);
-      if (sit === 'encerrada') erros.push(msgPrazoEncerrado(d.data));
+      const sit = situacaoParaMim(d.data);
+      if (sit !== 'aberta') erros.push(msgSituacao(sit, d.data));
     }
     if (mod.limite == null) erros.push(MSG_SEM_LIMITE);
     if (!d.pedidos.length) erros.push('Informe a quantidade de pelo menos um item.');
@@ -590,7 +623,7 @@
           <strong>${RETIRADA_TEXTO}</strong>
           <span class="small">Horário fixo para todas as solicitações.</span>
         </div>
-        <p class="muted small" style="margin-top:-.3rem">Prazo para enviar: até as ${PRAZO_TEXTO} de ${esc(fmtData(valores.data))} (horário de Brasília).</p>
+        <p class="muted small" style="margin-top:-.3rem">${temPermissao(perfil, 'qualquerHorario') ? `Seu acesso permite enviar <strong>em qualquer horário</strong> até o fim do dia ${esc(fmtData(valores.data))} (horário de Brasília).` : `Prazo para enviar: até as ${PRAZO_TEXTO} de ${esc(fmtData(valores.data))} (horário de Brasília).`}</p>
         <div class="aviso" id="avisoRestantes">Para esta data você ainda pode fazer <strong>${plural(restantesNaData(mod, valores.data), 'pedido', 'pedidos')}</strong> (limite: ${plural(limiteDia(mod), 'pedido', 'pedidos')} por dia).
           ${mod.limite != null ? `Limite do setor: <strong>até ${fmtQtd(mod.limite)} de cada item</strong> na data (soma dos pedidos do dia).` : esc(MSG_SEM_LIMITE)}</div>
 
@@ -645,16 +678,19 @@
     $('btnVoltar').onclick = () => formularioSolicitacao(mod, d);
     $('btnConfirmar').onclick = () => comBotao($('btnConfirmar'), async () => {
       const erro = msg => { $('erroConf').textContent = msg; };
-      // Prazo conferido de novo no momento da confirmação.
-      if (situacaoData(d.data) !== 'aberta') return erro(situacaoData(d.data) === 'passada' ? MSG_DATA_PASSADA : msgPrazoEncerrado(d.data));
       const contRef = doc(db, 'contadores', idContador(mod.id, d.data));
       let itensMap, modAtual;
       try {
-        // Confere limites e estoque com os dados mais recentes.
-        const [mSnap, ...snaps] = await Promise.all([
+        // Confere permissões, limites e estoque com os dados mais recentes.
+        const [uSnap, mSnap, ...snaps] = await Promise.all([
+          getDoc(doc(db, 'usuarios', perfil.uid)),
           getDoc(doc(db, 'modalidades', mod.id)),
           ...d.pedidos.map(x => getDoc(doc(db, 'itens', x.id)))
         ]);
+        if (uSnap.exists()) perfil.permissoes = uSnap.data().permissoes || {};
+        // Prazo (e permissões) conferidos de novo no momento da confirmação.
+        const sit = situacaoParaMim(d.data);
+        if (sit !== 'aberta') return erro(msgSituacao(sit, d.data));
         modAtual = { id: mSnap.id, ...mSnap.data() };
         const catalogo = snaps.filter(s => s.exists()).map(s => ({ id: s.id, ...s.data() }));
         const { erros, itens } = validarSolicitacao(modAtual, d, catalogo);
@@ -690,6 +726,8 @@
           const lote = writeBatch(db);
           lote.set(contRef, { setorId: mod.id, data: d.data, n, total: arred(totalAnterior + quantidadeTotal), itens: itensCont, legado: legadoDoContador(contAnterior) });
           // A solicitação não mexe no estoque: a baixa é feita no "Fornecido".
+          // Com a permissão "Aprovação automática" ela já entra como "Pedido Recebido".
+          const auto = temPermissao(perfil, 'aprovacaoAutomatica');
           lote.set(solRef, {
             modalidadeId: mod.id,
             data: d.data,
@@ -698,12 +736,13 @@
             itens: itensMap,
             usuarioId: perfil.uid,
             usuarioNome: perfil.nome,
-            status: 'pendente',
+            status: auto ? 'recebido' : 'pendente',
+            ...(auto ? { recebidoEm: serverTimestamp(), recebidoPorUid: perfil.uid, recebidoPorNome: 'Aprovação automática', aprovacaoAutomatica: true } : {}),
             baixaNoFornecimento: true,
             criadoEm: serverTimestamp()
           });
           await lote.commit();
-          return telaResponsavel('Solicitação registrada com sucesso.');
+          return telaResponsavel(auto ? 'Solicitação registrada com sucesso e já aprovada (Pedido Recebido).' : 'Solicitação registrada com sucesso.');
         } catch (e) {
           // Se a gravação chegou ao servidor e só a resposta se perdeu, não repete.
           try {
@@ -711,7 +750,9 @@
             if (ja.exists() && ja.data().usuarioId === perfil.uid) return telaResponsavel('Solicitação registrada com sucesso.');
           } catch (_) { /* sem acesso ou sem conexão */ }
           if (e.code !== 'permission-denied') return erro(msgErro(e));
-          if (situacaoData(d.data) !== 'aberta') return erro(msgPrazoEncerrado(d.data));
+          if (situacaoParaMim(d.data) !== 'aberta') return erro(msgSituacao(situacaoParaMim(d.data), d.data));
+          // Permissões alteradas pelo Administrador durante o envio: confere de novo.
+          try { const u = await getDoc(doc(db, 'usuarios', perfil.uid)); if (u.exists()) { const antes = JSON.stringify(permissoesDe(perfil)); perfil.permissoes = u.data().permissoes || {}; if (JSON.stringify(permissoesDe(perfil)) !== antes) return erro('Suas permissões foram alteradas pelo Administrador. Volte e revise a solicitação.'); } } catch (_) { /* segue */ }
           // Outra solicitação ocupou esta posição: tenta de novo com o contador atualizado.
         }
       }
@@ -837,7 +878,8 @@
     ['responsaveis', 'Responsáveis'],
     ['paioleiros', 'Paioleiros'],
     ['administradores', 'Administradores'],
-    ['vales', 'Vales de Gêneros']
+    ['vales', 'Vales de Gêneros'],
+    ['permissoes', '🔐 Gerenciar Permissões']
   ];
 
   // Setores cadastrados no Firebase (quantos forem necessários).
@@ -875,11 +917,11 @@
       app.innerHTML = CARREGANDO;
       try {
         const exclusoes = await lista('exclusoes').catch(() => []);
-        const [modalidades, eventos, usuarios, solicitacoes, itens, movimentos, auditoria, vales] = await Promise.all([
+        const [modalidades, eventos, usuarios, solicitacoes, itens, movimentos, auditoria, vales, auditoriaPermissoes] = await Promise.all([
           carregarSetores(), lista('eventos').catch(() => []), lista('usuarios'), lista('solicitacoes'), lista('itens'), lista('movimentos'),
-          lista('auditoria').catch(() => []), lista('vales').catch(() => [])
+          lista('auditoria').catch(() => []), lista('vales').catch(() => []), lista('auditoriaPermissoes').catch(() => [])
         ]);
-        dados = { modalidades, eventos, usuarios, solicitacoes, itens, movimentos, exclusoes, auditoria, vales };
+        dados = { modalidades, eventos, usuarios, solicitacoes, itens, movimentos, exclusoes, auditoria, vales, auditoriaPermissoes };
         await carregarConfigForn();
       } catch (e) {
         return telaFalha('Administrador', e, () => telaAdmin(aba, '', true));
@@ -2743,6 +2785,105 @@
             await b.commit();
             salvo('modalidades', 'Setores atualizados.');
           } catch (err) { erro(msgErro(err) + (err && err.code === 'permission-denied' ? ' Verifique se o novo nome já pertence a outro setor (clique em "Atualizar").' : '')); }
+        });
+      };
+    },
+
+    /* ---- Gerenciar Permissões (permissões individuais dos Responsáveis) ---- */
+    permissoes(p, selecionadoId, msgErro0) {
+      const PERFIS = { admin: 'Administrador', responsavel: 'Responsável', paioleiro: 'Paioleiro', catanheiro: 'Paioleiro' };
+      const usuarios = dados.usuarios.slice().sort((a, b) => (a.perfil === 'responsavel' ? 0 : 1) - (b.perfil === 'responsavel' ? 0 : 1) || ordemNatural(a.nome || '', b.nome || ''));
+      const setorDe = u => u.perfil === 'responsavel' ? nomeSetor(u.modalidadeId) : '—';
+      const sel = usuarios.find(u => u.id === selecionadoId && u.perfil === 'responsavel');
+      const atuais = sel ? permissoesDe(sel) : null;
+      const historico = sel ? (dados.auditoriaPermissoes || []).filter(a => a.usuarioId === sel.id).sort((a, b) => ms(b.em) - ms(a.em)) : [];
+      const titulo = id => (PERMISSOES.find(x => x.id === id) || { titulo: id }).titulo;
+      const juntar = l => l.map(id => `“${titulo(id)}”`).join(' e ');
+      p.innerHTML = `
+        ${sel ? `<section class="card perm-editor" id="cardPerm">
+          <h2>🔐 Permissões do usuário</h2>
+          <div class="perm-quem"><span class="nome">${esc(sel.nome)}</span><span class="setor">Setor ${esc(setorDe(sel))}</span><span class="muted small">${PERFIS[sel.perfil]}</span></div>
+          <form id="fPerm" novalidate>
+            <div class="perm-lista">${PERMISSOES.map(x => `<label class="perm-op ${atuais[x.id] ? 'ativa' : ''}" data-perm-op="${x.id}">
+              <input type="checkbox" name="${x.id}" ${atuais[x.id] ? 'checked' : ''}>
+              <span><span class="tit">${esc(x.titulo)} <span class="selo-ativa" ${atuais[x.id] ? '' : 'hidden'}>ATIVA</span><span class="selo-alterada" hidden>ALTERADA — NÃO SALVA</span></span>
+              <span class="desc">${esc(x.descricao)}</span></span></label>`).join('')}</div>
+            <p class="muted small">As permissões são independentes: qualquer combinação pode ser marcada. Valem só para este usuário e ficam ativas até um Administrador alterá-las.${sel.permissoesAtualizadasEm ? ` Última alteração: ${fmtDataHora(sel.permissoesAtualizadasEm)} por ${esc(sel.permissoesAtualizadasPorNome || '—')}.` : ''}</p>
+            <div class="erro" id="erroPerm">${esc(msgErro0 || '')}</div>
+            <div class="acoes"><button class="btn primario" type="submit" id="btnSalvarPerm">SALVAR PERMISSÕES</button><button class="btn secundario" type="button" id="btnCancelarPerm">CANCELAR</button></div>
+          </form>
+          <div class="perm-hist small"><strong>Histórico de alterações</strong>
+            ${historico.length ? `<ul>${historico.map(a => `<li>${fmtDataHora(a.em)} — <strong>${esc(a.porNome || '—')}</strong> ${[
+              (a.concedidas || []).length ? 'concedeu ' + esc(juntar(a.concedidas)) : '',
+              (a.retiradas || []).length ? 'retirou ' + esc(juntar(a.retiradas)) : ''].filter(Boolean).join('; ')}.</li>`).join('')}</ul>`
+              : '<p class="muted">Nenhuma alteração registrada.</p>'}
+          </div>
+        </section>` : ''}
+        <section class="card">
+          <h2>Gerenciar Permissões</h2>
+          <p class="muted small" style="margin-top:-.3rem">Permissões adicionais por usuário, sem criar novos perfis. As permissões valem para as solicitações dos <strong>Responsáveis</strong>. Escolha um usuário para configurar.</p>
+          <div class="perm-topo">
+            <span class="contagem" id="contPerm">${plural(usuarios.length, 'usuário cadastrado', 'usuários cadastrados')}</span>
+            <input class="perm-busca" id="buscaPerm" type="search" placeholder="🔎 Buscar por nome ou setor" aria-label="Buscar usuário por nome ou setor">
+          </div>
+          ${usuarios.length ? `<div class="tabela-wrap"><table>
+            <thead><tr><th>Usuário</th><th>Perfil</th><th>Setor</th><th>Permissões ativas</th><th></th></tr></thead>
+            <tbody>${usuarios.map(u => {
+              const resp = u.perfil === 'responsavel', ativas = resp ? PERMISSOES.filter(x => permissoesDe(u)[x.id]) : [];
+              return `<tr data-busca="${esc(normBusca((u.nome || '') + ' ' + setorDe(u) + ' ' + (u.email || '')))}" class="${sel && u.id === sel.id ? 'selecionada' : ''}">
+                <td><strong>${esc(u.nome || '—')}</strong></td><td>${PERFIS[u.perfil] || esc(u.perfil || '—')}</td><td>${esc(setorDe(u))}</td>
+                <td>${!resp ? '<span class="sem-perm">Não se aplica (só Responsáveis fazem solicitações)</span>'
+                  : ativas.length ? ativas.map(x => `<span class="chip-perm">✓ ${esc(x.curto)}</span>`).join('') : '<span class="sem-perm">Nenhuma</span>'}</td>
+                <td class="num">${resp ? `<button type="button" class="btn ${sel && u.id === sel.id ? 'primario' : 'secundario'} pequeno" data-config-perm="${u.id}">${sel && u.id === sel.id ? 'Selecionado' : 'Configurar'}</button>` : ''}</td>
+              </tr>`;
+            }).join('')}</tbody></table></div>
+            <p class="muted small" id="semResultadoPerm" hidden>Nenhum usuário encontrado para a busca.</p>` : '<p class="muted">Nenhum usuário cadastrado.</p>'}
+        </section>`;
+
+      p.querySelectorAll('[data-config-perm]').forEach(b => b.onclick = () => { PAINEIS.permissoes(p, b.dataset.configPerm); window.scrollTo?.(0, 0); });
+      const busca = $('buscaPerm');
+      if (busca) busca.oninput = () => {
+        const q = normBusca(busca.value.trim()); let vis = 0;
+        p.querySelectorAll('tbody tr[data-busca]').forEach(tr => { const ok = !q || tr.dataset.busca.includes(q); tr.hidden = !ok; if (ok) vis++; });
+        $('semResultadoPerm').hidden = vis > 0;
+        $('contPerm').textContent = q ? `${vis} de ${plural(usuarios.length, 'usuário cadastrado', 'usuários cadastrados')}` : plural(usuarios.length, 'usuário cadastrado', 'usuários cadastrados');
+      };
+      if (!sel) return;
+
+      const f = $('fPerm');
+      const marcadas = () => Object.fromEntries(PERMISSOES.map(x => [x.id, f.querySelector(`[name="${x.id}"]`).checked]));
+      f.querySelectorAll('input[type=checkbox]').forEach(cb => cb.onchange = () => {
+        const op = cb.closest('[data-perm-op]'), id = op.dataset.permOp;
+        op.classList.toggle('ativa', cb.checked);
+        op.querySelector('.selo-ativa').hidden = !cb.checked;
+        op.querySelector('.selo-alterada').hidden = cb.checked === atuais[id];
+        $('erroPerm').textContent = '';
+      });
+      $('btnCancelarPerm').onclick = () => PAINEIS.permissoes(p);
+      f.onsubmit = e => {
+        e.preventDefault();
+        const depois = marcadas();
+        const concedidas = PERMISSOES.filter(x => depois[x.id] && !atuais[x.id]).map(x => x.id);
+        const retiradas = PERMISSOES.filter(x => !depois[x.id] && atuais[x.id]).map(x => x.id);
+        if (!concedidas.length && !retiradas.length) { $('erroPerm').textContent = 'Nenhuma alteração para salvar.'; return; }
+        comBotao($('btnSalvarPerm'), async () => {
+          // Registro de auditoria + permissões do usuário, gravados juntos (o Firebase exige os dois).
+          const regId = `${sel.id}_${Date.now()}${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}`;
+          try {
+            const b = writeBatch(db);
+            b.set(doc(db, 'auditoriaPermissoes', regId), {
+              usuarioId: sel.id, usuarioNome: sel.nome || '', setorId: sel.modalidadeId || null,
+              antes: atuais, depois, concedidas, retiradas,
+              porUid: perfil.uid, porNome: perfil.nome, em: serverTimestamp()
+            });
+            b.update(doc(db, 'usuarios', sel.id), {
+              permissoes: depois, permissoesRegistro: regId,
+              permissoesAtualizadasEm: serverTimestamp(), permissoesAtualizadasPorUid: perfil.uid, permissoesAtualizadasPorNome: perfil.nome
+            });
+            await b.commit();
+          } catch (err) { $('erroPerm').textContent = 'Não foi possível salvar as permissões: ' + msgErro(err); return; }
+          const ativas = PERMISSOES.filter(x => depois[x.id]).map(x => x.titulo);
+          salvo('permissoes', `✅ Permissões de ${sel.nome} (${setorDe(sel)}) salvas. ${ativas.length ? 'Ativas: ' + ativas.join('; ') + '.' : 'Nenhuma permissão especial ativa.'}`);
         });
       };
     },
