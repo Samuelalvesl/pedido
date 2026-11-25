@@ -389,6 +389,108 @@ service cloud.firestore {
         && n.get('ultimaBaixaEm', null) == a.get('ultimaBaixaEm', null);
     }
 
+    // ================= Edição das quantidades pelo Administrador =================
+    // Somente com o pedido "Pendente" (antes do "Pedido Recebido"). Só itens que já estavam
+    // no pedido (item retirado = quantidade 0, ao menos um item fica); nome e unidade não mudam;
+    // cada quantidade até o limite do setor por item e até o saldo em estoque. A quantidade
+    // original ("itensOriginais") é gravada na primeira edição e nunca muda; cada edição é
+    // acrescentada ao mapa "edicoesQuantidade" (e1, e2...; as anteriores não mudam). O contador do dia do setor
+    // é ajustado no mesmo lote (limite diário por item). O estoque não é alterado.
+    function caminhoSolicitacaoContador(a) {
+      return caminhoContador(a.modalidadeId + '_' + a.data);
+    }
+    function itemEditadoValido(n, a, nk, i, limite) {
+      return nk.size() <= i
+        || (n.itens[nk[i]] is map
+            && n.itens[nk[i]].keys().hasOnly(['nome', 'unidade', 'quantidade'])
+            && n.itens[nk[i]].nome == a.itens[nk[i]].nome
+            && n.itens[nk[i]].unidade == a.itens[nk[i]].unidade
+            && n.itens[nk[i]].quantidade is number
+            && n.itens[nk[i]].quantidade > 0
+            && n.itens[nk[i]].quantidade <= limite + TOL()
+            && n.itens[nk[i]].quantidade <= get(caminhoItem(nk[i])).data.saldo + TOL());
+    }
+    // Edições numeradas "e1", "e2"...: só a próxima é acrescentada; as anteriores não mudam.
+    function edicaoRegistradaValida(n, a) {
+      let ant = a.get('edicoesQuantidade', {});
+      let k = 'e' + string(ant.size() + 1);
+      return n.edicoesQuantidade is map
+        && n.edicoesQuantidade.size() == ant.size() + 1
+        && n.edicoesQuantidade.diff(ant).affectedKeys().hasOnly([k])
+        && k in n.edicoesQuantidade
+        && novaEdicaoValida(n.edicoesQuantidade[k]);
+    }
+    function novaEdicaoValida(e) {
+      return e is map
+        && e.keys().hasOnly(['em', 'porUid', 'porNome', 'itens'])
+        && e.em == request.time
+        && e.porUid == request.auth.uid
+        && e.porNome == meuPerfil().nome
+        && e.itens is map
+        && e.itens.size() >= 1;
+    }
+    function editarQuantidades(solId, n, a) {
+      let nk = n.itens.keys();
+      let limite = get(/databases/$(database)/documents/modalidades/$(a.modalidadeId)).data.limite;
+      let cont = getAfter(caminhoSolicitacaoContador(a)).data;
+      return a.get('status', 'pendente') == 'pendente'
+        && n.get('status', 'pendente') == 'pendente'
+        && a.get('criadoPorAdmin', false) != true
+        && n.diff(a).affectedKeys().hasOnly(['itens', 'quantidade', 'itensOriginais', 'edicoesQuantidade'])
+        && n.itens is map
+        && nk.size() >= 1
+        && a.itens.keys().hasAll(nk)
+        && n.itensOriginais == a.get('itensOriginais', a.itens)
+        && n.quantidade is number
+        && n.quantidade > 0
+        && limite is number
+        && itemEditadoValido(n, a, nk, 0, limite)
+        && itemEditadoValido(n, a, nk, 1, limite)
+        && itemEditadoValido(n, a, nk, 2, limite)
+        && itemEditadoValido(n, a, nk, 3, limite)
+        && itemEditadoValido(n, a, nk, 4, limite)
+        && itemEditadoValido(n, a, nk, 5, limite)
+        && edicaoRegistradaValida(n, a)
+        && cont.get('ultimoAjuste', '') == solId
+        && cont.get('ultimoAjusteEm', null) == request.time;
+    }
+    // Ajuste do contador do dia feito junto com a edição: cada item do pedido muda exatamente
+    // a diferença (nova − anterior); o acumulado do dia não pode passar do limite do setor
+    // (a não ser que esteja diminuindo).
+    function ajusteItemContadorOk(n, a, sa, sn, ks, i, limite) {
+      return ks.size() <= i || ajusteDoItemOk(n, a, sa, sn, ks[i], limite);
+    }
+    function ajusteDoItemOk(n, a, sa, sn, k, limite) {
+      let antes = a.get('itens', {}).get(k, a.get('legado', a.get('total', 0)));
+      return n.itens[k] is number
+        && math.abs(n.itens[k] - (antes + sn.itens.get(k, {'quantidade': 0}).quantidade - sa.itens[k].quantidade)) < TOL()
+        && (n.itens[k] <= limite + TOL() || n.itens[k] <= antes + TOL());
+    }
+    function ajusteContadorValido(id, n, a) {
+      let caminhoSol = /databases/$(database)/documents/solicitacoes/$(n.ultimoAjuste);
+      let sa = get(caminhoSol).data;
+      let sn = getAfter(caminhoSol).data;
+      let ks = sa.itens.keys();
+      let limite = get(/databases/$(database)/documents/modalidades/$(a.setorId)).data.limite;
+      return n.diff(a).affectedKeys().hasOnly(['itens', 'total', 'ultimoAjuste', 'ultimoAjusteEm'])
+        && n.ultimoAjuste is string
+        && n.ultimoAjusteEm == request.time
+        && sa.modalidadeId == a.setorId
+        && sa.data == a.data
+        && sa.get('criadoPorAdmin', false) != true
+        && n.total is number
+        && math.abs(n.total - (a.get('total', 0) + sn.quantidade - sa.quantidade)) < TOL()
+        && n.itens is map
+        && n.itens.diff(a.get('itens', {})).affectedKeys().hasOnly(ks)
+        && limite is number
+        && ajusteItemContadorOk(n, a, sa, sn, ks, 0, limite)
+        && ajusteItemContadorOk(n, a, sa, sn, ks, 1, limite)
+        && ajusteItemContadorOk(n, a, sa, sn, ks, 2, limite)
+        && ajusteItemContadorOk(n, a, sa, sn, ks, 3, limite)
+        && ajusteItemContadorOk(n, a, sa, sn, ks, 4, limite)
+        && ajusteItemContadorOk(n, a, sa, sn, ks, 5, limite);
+    }
+
     // ================= Permissões individuais: gravação =================
     function CAMPOS_PERMISSOES() {
       return ['permissoes', 'permissoesRegistro', 'permissoesAtualizadasEm', 'permissoesAtualizadasPorUid', 'permissoesAtualizadasPorNome'];
@@ -516,7 +618,7 @@ service cloud.firestore {
       let sol = getAfter(/databases/$(database)/documents/solicitacoes/$(id + '_' + string(n.n))).data;
       let ks = sol.itens.keys();
       return p.perfil == 'responsavel'
-        && n.keys().hasOnly(['setorId', 'data', 'n', 'total', 'itens', 'legado'])
+        && n.keys().hasOnly(['setorId', 'data', 'n', 'total', 'itens', 'legado', 'ultimoAjuste', 'ultimoAjusteEm'])
         && n.keys().hasAll(['setorId', 'data', 'n', 'total', 'itens', 'legado'])
         && n.setorId == p.modalidadeId
         && dataValida(n.data)
@@ -550,8 +652,9 @@ service cloud.firestore {
       allow create: if logado() && contadorValido(id, request.resource.data, 0, 0, {}, 0);
       allow update: if logado() && resource.data.setorId == request.resource.data.setorId
         && resource.data.data == request.resource.data.data
-        && contadorValido(id, request.resource.data, resource.data.n, resource.data.get('total', 0),
-             resource.data.get('itens', {}), resource.data.get('legado', resource.data.get('total', 0)));
+        && (contadorValido(id, request.resource.data, resource.data.n, resource.data.get('total', 0),
+             resource.data.get('itens', {}), resource.data.get('legado', resource.data.get('total', 0)))
+            || (ehAdmin() && ajusteContadorValido(id, request.resource.data, resource.data)));
       allow delete: if false;
     }
 
@@ -814,7 +917,8 @@ service cloud.firestore {
       allow update: if (ehAdmin() && marcarRecebido(request.resource.data, resource.data))
         || ((ehAdmin() || ehPaioleiro()) && marcarFornecido(solId, request.resource.data, resource.data))
         || (ehAdmin() && cancelarPedido(solId, request.resource.data, resource.data))
-        || (ehAdmin() && corrigirDataEfetiva(solId, request.resource.data, resource.data));
+        || (ehAdmin() && corrigirDataEfetiva(solId, request.resource.data, resource.data))
+        || (ehAdmin() && editarQuantidades(solId, request.resource.data, resource.data));
       // Exclusão de histórico: somente o Administrador e somente solicitações concluídas
       // (Fornecido/Atendido), para não afetar pedidos em andamento nem o estoque.
       allow delete: if ehAdmin() && resource.data.status in ['fornecido', 'atendido'];
