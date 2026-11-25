@@ -256,15 +256,36 @@
   // Quantidade efetivamente fornecida de um item (quando a solicitação já foi fornecida).
   const qtdFornecida = (s, i) => (s.fornecidos && s.fornecidos[i.id] != null) ? s.fornecidos[i.id] : i.quantidade;
   const textoRetirada = s => s.data ? RETIRADA_TEXTO : (s.horarioRetirada || '—');
+  // ---------- Quantidades editadas pelo Administrador (antes do "Pedido Recebido") ----------
+  // "itensOriginais": o pedido como o Responsável fez (gravado na 1ª edição, nunca muda).
+  // "edicoesQuantidade": mapa { e1, e2, ... }, uma entrada por edição { em, porUid, porNome, itens: { id: { nome, unidade, de, para } } }.
+  const edicoesDe = s => Object.entries((s && s.edicoesQuantidade) || {}).sort((a, b) => +a[0].slice(1) - +b[0].slice(1)).map(([, e]) => e);
+  const foiEditada = s => !!(s && s.itensOriginais && edicoesDe(s).length);
+  const qtdSolicitadaOriginal = (s, id) => {
+    const o = s && s.itensOriginais && s.itensOriginais[id];
+    return o ? o.quantidade : ((s.itens || {})[id] || {}).quantidade || 0;
+  };
+  function historicoQtdHtml(s) {
+    if (!foiEditada(s)) return '';
+    return `<span class="selo-editado">✏ QUANTIDADES ALTERADAS</span><div class="hist-qtd"><strong>Histórico de quantidades</strong>${edicoesDe(s).map(e =>
+      `<div>${fmtDataHora(e.em)} — <strong>${esc(e.porNome || '—')}</strong>: ${Object.values(e.itens || {}).sort((a, b) => a.nome.localeCompare(b.nome))
+        .map(x => `${esc(x.nome)} ${esc(fmtQtd(x.de))} → ${esc(qtdUn(x.para, x.unidade))}${x.para === 0 ? ' (retirado)' : ''}`).join('; ')}.</div>`).join('')}</div>`;
+  }
   function listaItensHtml(s) {
     const l = itensDaSolicitacao(s);
-    if (!l.length) return '<span class="muted">—</span>';
+    const retirados = foiEditada(s) ? Object.entries(s.itensOriginais).filter(([id]) => !(s.itens || {})[id]).map(([id, v]) => ({ id, ...v })) : [];
+    if (!l.length && !retirados.length) return '<span class="muted">—</span>';
+    const orig = i => {
+      if (!foiEditada(s)) return '';
+      const o = qtdSolicitadaOriginal(s, i.id);
+      return Math.abs(o - i.quantidade) > EPS ? ` <span class="qtd-orig">(solicitado ${esc(qtdUn(o, i.unidade))})</span>` : '';
+    };
     return `<ul class="lista-itens">${l.map(i => {
       const f = qtdFornecida(s, i);
       return s.fornecidos && Math.abs(f - i.quantidade) > EPS
-        ? `<li>${esc(i.nome)}: <strong>${esc(qtdUn(f, i.unidade))}</strong> <span class="muted">(aprovado ${esc(qtdUn(i.quantidade, i.unidade))})</span></li>`
-        : `<li>${esc(i.nome)}: <strong>${esc(qtdUn(i.quantidade, i.unidade))}</strong></li>`;
-    }).join('')}</ul>`;
+        ? `<li>${esc(i.nome)}: <strong>${esc(qtdUn(f, i.unidade))}</strong> <span class="muted">(aprovado ${esc(qtdUn(i.quantidade, i.unidade))})</span>${orig(i)}</li>`
+        : `<li>${esc(i.nome)}: <strong>${esc(qtdUn(i.quantidade, i.unidade))}</strong>${orig(i)}</li>`;
+    }).join('')}${retirados.map(i => `<li class="item-retirado">${esc(i.nome)}: <strong>retirado</strong> <span class="qtd-orig">(solicitado ${esc(qtdUn(i.quantidade, i.unidade))})</span></li>`).join('')}</ul>${historicoQtdHtml(s)}`;
   }
   // "Registro de Alterações na Quantidade": somente itens com redução.
   function tabelaRegistro(alteracoes, porNome, quando) {
@@ -1266,12 +1287,14 @@
       const setor = nomeSetor(s.modalidadeId);
       const l = porSetor.get(s.modalidadeId) || { setor, uf: i.unidade, qtdSol: 0, qtdForn: 0, reduzido: false, solicitacoes: [] };
       const forn = qtdFornecida(s, i);
-      l.qtdSol = arred(l.qtdSol + i.quantidade); l.qtdForn = arred(l.qtdForn + forn);
-      l.reduzido = l.reduzido || maior(i.quantidade, forn); l.solicitacoes.push(s.id);
+      // QTD. SOL. = quantidade originalmente solicitada pelo Responsável (antes de uma edição do Administrador).
+      l.qtdSol = arred(l.qtdSol + qtdSolicitadaOriginal(s, i.id)); l.qtdForn = arred(l.qtdForn + forn);
+      l.solicitacoes.push(s.id);
       porSetor.set(s.modalidadeId, l);
     }
     const linhas = [...porSetor.values()].sort((a, b) => ordemNatural(a.setor, b.setor))
-      .map(l => ({ setor: l.setor, uf: l.uf, qtdSol: l.qtdSol, qtdForn: l.qtdForn, obs: l.reduzido ? 'Reduzido' : '', solicitacoes: l.solicitacoes }));
+      .map(l => ({ setor: l.setor, uf: l.uf, qtdSol: l.qtdSol, qtdForn: l.qtdForn,
+        obs: maior(l.qtdSol, l.qtdForn) ? 'Reduzido' : maior(l.qtdForn, l.qtdSol) ? 'Aumentado' : '', solicitacoes: l.solicitacoes }));
     return {
       data: dt, itemId, itemNome: nomeItem, unidade, setorId: setorId || null,
       setoresNomes: linhas.map(l => l.setor),
@@ -1725,6 +1748,152 @@
   }
   function fecharModal() { $('modalPedido')?.remove(); document.body.classList.remove('com-modal'); }
 
+  /* ================= EDITAR QUANTIDADES (Administrador, pedido Pendente) ================= */
+  // O Administrador ajusta a quantidade de cada item antes do "Pedido Recebido". Respeita o
+  // limite do setor por item (somando os pedidos do setor na data) e o saldo em estoque.
+  // Guarda a quantidade original e cada edição; ajusta o contador do dia no mesmo lote.
+  // Não mexe no estoque (a baixa continua no FORNECER).
+  const numeroDoPedido = s => { const m = String(s.id).match(/_\d{4}-\d{2}-\d{2}_(\d+)$/); return m ? `Nº ${m[1]}` : '—'; };
+  async function editarQuantidades(s) {
+    if (!s) return;
+    if (statusDe(s) !== 'pendente') return alert('Só é possível editar as quantidades de pedidos Pendentes (antes do "Pedido Recebido").');
+    const setor = modalidade(s.modalidadeId) || {};
+    const originais = s.itensOriginais || s.itens || {};
+    const linhas = Object.entries(originais).map(([id, v]) => ({ id, nome: v.nome, unidade: v.unidade, original: v.quantidade, atual: (s.itens || {})[id] ? s.itens[id].quantidade : 0 }))
+      .sort((a, b) => a.nome.localeCompare(b.nome));
+    // Já pedido no dia pelos OUTROS pedidos do setor (o contador inclui este pedido).
+    let cont = null;
+    try { const c = await getDoc(doc(db, 'contadores', idContador(s.modalidadeId, dataDe(s)))); cont = c.exists() ? c.data() : null; } catch (e) { cont = null; }
+    const outrosDe = id => {
+      const atual = (s.itens || {})[id] ? s.itens[id].quantidade : 0;
+      const soma = dados.solicitacoes.filter(x => x.id !== s.id && x.modalidadeId === s.modalidadeId && dataDe(x) === dataDe(s) && !criadaPeloAdmin(x))
+        .reduce((t, x) => t + ((x.itens && x.itens[id]) ? x.itens[id].quantidade || 0 : 0), 0);
+      return Math.max(0, arred(Math.max(cont ? itemNoContador(cont, id) - atual : 0, soma)));
+    };
+    const limite = setor.limite;
+    const dica = l => limite == null ? '' : `disponível no dia: até ${esc(qtdUn(Math.max(0, arred(limite - outrosDe(l.id))), l.unidade))} (outros pedidos do setor: ${esc(qtdUn(outrosDe(l.id), l.unidade))})`;
+    abrirModal(`<div class="modal-largo-conteudo"><h3 class="modal-titulo">✏ Editar quantidades do pedido</h3>
+      <dl class="resumo"><dt>Pedido</dt><dd>${esc(numeroDoPedido(s))}</dd><dt>Setor</dt><dd>${esc(nomeSetor(s.modalidadeId))}</dd>
+        <dt>Data de retirada</dt><dd>${esc(fmtDataSemana(dataDe(s)))}</dd><dt>Solicitado por</dt><dd>${esc(s.usuarioNome || '—')} · ${fmtDataHora(s.criadoEm)}</dd></dl>
+      <p class="small muted" style="margin-top:-.4rem">Altere a quantidade de cada item. Limite do setor ${esc(nomeSetor(s.modalidadeId))}: <strong>${limite != null ? `até ${esc(fmtQtd(limite))} de cada item por dia` : 'não definido'}</strong> (soma dos pedidos do setor na data). Unidade e item não mudam. Use 0 para retirar um item do pedido (pelo menos um item precisa ficar).</p>
+      <div class="tabela-wrap"><table class="tabela-editar">
+        <thead><tr><th>Item</th><th>Unidade</th><th class="num">Quantidade solicitada</th><th class="num">Nova quantidade</th><th class="num">Diferença</th></tr></thead>
+        <tbody>${linhas.map(l => `<tr data-ed-linha="${l.id}">
+          <td><strong>${esc(l.nome)}</strong><span class="lim-item">${dica(l)}</span><span class="msg-lim" hidden></span></td>
+          <td>${esc(l.unidade)}</td>
+          <td class="num">${esc(fmtQtd(l.original))}</td>
+          <td class="num">${l.atual > EPS ? `<input type="text" inputmode="decimal" data-ed-qtd="${l.id}" value="${editavel(l.atual)}" aria-label="Nova quantidade de ${esc(l.nome)} (${esc(l.unidade)})">` : `<input type="text" data-ed-qtd="${l.id}" value="0" disabled title="Item retirado em edição anterior" aria-label="${esc(l.nome)}: retirado">`}</td>
+          <td class="num"><span class="dif" data-ed-dif="${l.id}"></span></td></tr>`).join('')}</tbody></table></div>
+      <div class="erro" id="erroModal"></div>
+      <div class="acoes modal-acoes"><button class="btn secundario" id="btnModalVoltar">CANCELAR</button><button class="btn primario" id="btnModalSalvarQtd">SALVAR ALTERAÇÕES</button></div></div>`);
+    $('modalPedido').querySelector('.modal').classList.add('modal-largo');
+    const em = msg => { $('erroModal').textContent = msg; };
+    // Lê e valida. Devolve { erros, porLinha, novas } (novas: id -> quantidade).
+    function ler() {
+      const erros = [], porLinha = {}, novas = {};
+      for (const l of linhas) {
+        if (!(l.atual > EPS)) { novas[l.id] = 0; continue; }
+        const txt = $('modalPedido').querySelector(`[data-ed-qtd="${l.id}"]`).value.trim();
+        const n = txt === '' ? NaN : paraNumero(txt);
+        const it = dados.itens.find(x => x.id === l.id);
+        let msg = '';
+        if (n == null || Number.isNaN(n) || n < 0) msg = `quantidade inválida (${DICA_DECIMAL}; até 3 casas decimais; 0 retira o item).`;
+        else if (n > EPS) {
+          const outros = outrosDe(l.id);
+          if (limite == null) msg = MSG_SEM_LIMITE;
+          else if (maior(n, limite)) msg = `ultrapassa o limite do setor por item: máximo ${qtdUn(limite, l.unidade)}.`;
+          else if (maior(arred(outros + n), limite) && maior(n, l.atual)) msg = `ultrapassa o limite diário do setor por item: ${qtdUn(outros, l.unidade)} já pedidos por outros pedidos + ${qtdUn(n, l.unidade)} = ${qtdUn(arred(outros + n), l.unidade)} (máximo ${qtdUn(limite, l.unidade)}).`;
+          else if (!it || !it.ativo) msg = 'item não está mais disponível.';
+          else if (maior(n, it.saldo)) msg = `estoque insuficiente (disponível ${qtdUn(Math.max(0, it.saldo), l.unidade)}).`;
+        }
+        if (msg) { porLinha[l.id] = msg; erros.push(`${l.nome}: ${msg}`); }
+        novas[l.id] = Number.isNaN(n) || n == null ? null : arred(n);
+      }
+      if (!erros.length && !linhas.some(l => novas[l.id] > EPS)) erros.push('Pelo menos um item precisa ficar no pedido (quantidade maior que 0).');
+      return { erros, porLinha, novas };
+    }
+    function atualizar() {
+      const { porLinha, novas } = ler();
+      for (const l of linhas) {
+        const tr = $('modalPedido').querySelector(`[data-ed-linha="${l.id}"]`), n = novas[l.id];
+        const d = n == null ? null : arred(n - l.original);
+        const dif = tr.querySelector('[data-ed-dif]');
+        dif.textContent = d == null || Math.abs(d) <= EPS ? '—' : (d > 0 ? '+' : '−') + fmtQtd(Math.abs(d));
+        dif.className = 'dif ' + (d == null || Math.abs(d) <= EPS ? 'muted' : d > 0 ? 'mais' : 'menos');
+        tr.classList.toggle('mudou', n != null && Math.abs(n - l.atual) > EPS);
+        tr.classList.toggle('excede', !!porLinha[l.id]);
+        const ml = tr.querySelector('.msg-lim'); ml.hidden = !porLinha[l.id]; ml.textContent = porLinha[l.id] || '';
+      }
+      em('');
+    }
+    $('modalPedido').querySelectorAll('[data-ed-qtd]').forEach(i => i.oninput = atualizar);
+    atualizar();
+    $('btnModalVoltar').onclick = fecharModal;
+    $('btnModalSalvarQtd').onclick = salvarEdicao;
+    function salvarEdicao() {
+      const { erros, novas } = ler();
+      if (erros.length) return em(erros.join('\n'));
+      const mudancas = linhas.filter(l => Math.abs(novas[l.id] - l.atual) > EPS);
+      if (!mudancas.length) return em('Nenhuma alteração: as quantidades são iguais às atuais.');
+      // Confirmação
+      const corpo = $('modalPedido').querySelector('.modal');
+      const salvoHtml = corpo.innerHTML;
+      const valores = Object.fromEntries(linhas.map(l => [l.id, $('modalPedido').querySelector(`[data-ed-qtd="${l.id}"]`).value]));
+      corpo.innerHTML = `<h3 class="modal-titulo">Confirmar alteração das quantidades</h3>
+        <p style="margin:.2rem 0 .5rem;font-weight:600">As quantidades do pedido ${esc(numeroDoPedido(s))} do setor ${esc(nomeSetor(s.modalidadeId))} (retirada ${esc(fmtData(dataDe(s)))}) serão modificadas:</p>
+        <ul class="resumo-mud">${linhas.map(l => {
+          const n = novas[l.id], d = arred(n - l.atual);
+          if (Math.abs(d) <= EPS) return `<li class="muted">${esc(l.nome)}: ${esc(qtdUn(l.atual, l.unidade))} (sem alteração)</li>`;
+          return `<li>${esc(l.nome)}: ${esc(qtdUn(l.atual, l.unidade))} → <strong>${n > EPS ? esc(qtdUn(n, l.unidade)) : 'retirado do pedido'}</strong> <span class="dif ${d > 0 ? 'mais' : 'menos'}">(${d > 0 ? '+' : '−'}${esc(qtdUn(Math.abs(d), l.unidade))})</span></li>`;
+        }).join('')}</ul>
+        <p class="small muted">A quantidade originalmente solicitada fica preservada no histórico, com o seu nome, a data e o horário. O pedido continua <strong>Pendente</strong> até você marcar “Pedido Recebido”. O estoque não é alterado.</p>
+        <div class="erro" id="erroModal"></div>
+        <div class="acoes modal-acoes"><button class="btn secundario" id="btnModalVoltarEd">Voltar</button><button class="btn primario" id="btnModalConfirmarQtd">Confirmar e salvar</button></div>`;
+      $('btnModalVoltarEd').onclick = () => {
+        corpo.innerHTML = salvoHtml;
+        linhas.forEach(l => { $('modalPedido').querySelector(`[data-ed-qtd="${l.id}"]`).value = valores[l.id]; });
+        $('modalPedido').querySelectorAll('[data-ed-qtd]').forEach(i => i.oninput = atualizar);
+        $('btnModalVoltar').onclick = fecharModal;
+        $('btnModalSalvarQtd').onclick = salvarEdicao;
+        atualizar();
+      };
+      $('btnModalConfirmarQtd').onclick = () => comBotao($('btnModalConfirmarQtd'), async () => {
+        const erroC = msg => { $('erroModal').textContent = msg; };
+        const ref = doc(db, 'solicitacoes', s.id), contRef = doc(db, 'contadores', idContador(s.modalidadeId, dataDe(s)));
+        try {
+          const [sSnap, cSnap] = await Promise.all([getDoc(ref), getDoc(contRef)]);
+          if (!sSnap.exists()) return erroC('Pedido não encontrado.');
+          const atual = { id: sSnap.id, ...sSnap.data() };
+          if (statusDe(atual) !== 'pendente') return erroC('Este pedido não está mais Pendente (já foi recebido, fornecido ou cancelado). As quantidades não podem ser alteradas.');
+          if (JSON.stringify(atual.itens) !== JSON.stringify(s.itens)) return erroC('As quantidades deste pedido foram alteradas por outra pessoa. Feche e abra a edição novamente.');
+          if (!cSnap.exists()) return erroC('Não foi possível ajustar o limite diário deste pedido (contador do dia não encontrado). Pedidos antigos não podem ser editados.');
+          const c = cSnap.data();
+          const novosItens = {}, regItens = {};
+          linhas.forEach(l => {
+            const n = novas[l.id];
+            if (n > EPS) novosItens[l.id] = { nome: l.nome, unidade: l.unidade, quantidade: n };
+            if (Math.abs(n - l.atual) > EPS) regItens[l.id] = { nome: l.nome, unidade: l.unidade, de: l.atual, para: n };
+          });
+          const quantidadeNova = arred(Object.values(novosItens).reduce((t, i) => t + i.quantidade, 0));
+          const itensCont = { ...(c.itens || {}) };
+          Object.keys(atual.itens || {}).forEach(id => { const l = linhas.find(x => x.id === id); itensCont[id] = arred(itemNoContador(c, id) + (novas[id] || 0) - l.atual); });
+          const numEd = Object.keys(atual.edicoesQuantidade || {}).length + 1;
+          const lote = writeBatch(db);
+          lote.update(ref, {
+            itens: novosItens,
+            quantidade: quantidadeNova,
+            itensOriginais: atual.itensOriginais || atual.itens,
+            ['edicoesQuantidade.e' + numEd]: { em: serverTimestamp(), porUid: perfil.uid, porNome: perfil.nome, itens: regItens }
+          });
+          lote.update(contRef, { itens: itensCont, total: arred((c.total || 0) + quantidadeNova - (atual.quantidade || 0)), ultimoAjuste: s.id, ultimoAjusteEm: serverTimestamp() });
+          await lote.commit();
+        } catch (e) { return erroC('Não foi possível salvar as alterações: ' + msgErro(e) + (e && e.code === 'permission-denied' ? ' Verifique o limite do setor, o estoque e se o pedido ainda está Pendente (clique em "Atualizar").' : '')); }
+        fecharModal();
+        ctxSol.recarregar(`Quantidades do pedido ${numeroDoPedido(s)} (${nomeSetor(s.modalidadeId)}) alteradas: ${mudancas.map(l => `${l.nome} ${fmtQtd(l.atual)} → ${novas[l.id] > EPS ? qtdUn(novas[l.id], l.unidade) : 'retirado'}`).join('; ')}. O pedido continua Pendente.`);
+      });
+    }
+  }
+
   /* ================= Paioleiro ================= */
   // Vê apenas solicitações autorizadas ("Pedido Recebido") e as já fornecidas,
   // e só pode marcar "Fornecido" (com baixa no estoque).
@@ -1861,7 +2030,8 @@
       const acoes = s => {
         const st = statusDe(s);
         if (st === 'pendente' && !paioleiro)
-          return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-receber="${s.id}">Pedido Recebido</button></div>${btnCancelar(s)}`;
+          return (criadaPeloAdmin(s) ? '' : `<div style="margin-top:.35rem"><button class="btn secundario pequeno btn-editar-qtd" data-editar-qtd="${s.id}">✏ EDITAR QUANTIDADES</button></div>`) +
+            `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-receber="${s.id}">Pedido Recebido</button></div>${btnCancelar(s)}`;
         if (st === 'recebido')
           return `<div style="margin-top:.35rem"><button class="btn primario pequeno" data-fornecer="${s.id}">FORNECER</button></div>${btnCancelar(s)}`;
         if (st === 'fornecido')
@@ -2090,6 +2260,7 @@
       });
 
       // ---- Cancelar pedido (somente Administrador; antes do fornecimento) ----
+      p.querySelectorAll('[data-editar-qtd]').forEach(b => b.onclick = () => editarQuantidades(dados.solicitacoes.find(x => x.id === b.dataset.editarQtd)));
       p.querySelectorAll('[data-cancelar]').forEach(b => b.onclick = () => {
         const s = dados.solicitacoes.find(x => x.id === b.dataset.cancelar);
         if (statusDe(s) === 'fornecido' || statusDe(s) === 'atendido') return erro('Não é possível cancelar este pedido, pois o fornecimento já foi realizado.');
