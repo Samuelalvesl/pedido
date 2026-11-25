@@ -540,3 +540,22 @@ tr.selecionada td{background:var(--azul-50)}
   .perm-busca{max-width:none}
   .perm-quem .nome{font-size:1.15rem}
 }
+
+/* ---------- Editar quantidades (Administrador) ---------- */
+.modal.modal-largo{max-width:760px}
+.tabela-editar td,.tabela-editar th{vertical-align:middle}
+.tabela-editar input{max-width:120px;text-align:right;margin:0}
+.tabela-editar tr.mudou td{background:var(--azul-50)}
+.tabela-editar tr.excede td{background:#fdecec}
+.tabela-editar tr.excede input{border-color:var(--erro)}
+.dif{font-weight:800;white-space:nowrap}.dif.menos{color:#b45309}.dif.mais{color:#1a7f37}
+.lim-item{display:block;font-size:.75rem;color:#5b6475;margin-top:.15rem;font-weight:400}
+.msg-lim{display:block;font-size:.78rem;color:var(--erro);font-weight:700;margin-top:.2rem}
+.msg-lim[hidden]{display:none}
+.btn-editar-qtd{font-weight:800}
+.selo-editado{display:inline-block;background:#b45309;color:#fff;border-radius:999px;font-size:.68rem;font-weight:800;padding:.08rem .5rem;margin-top:.25rem}
+.qtd-orig{color:#6b7280;font-size:.82rem}
+.item-retirado{color:#6b7280}
+.hist-qtd{margin-top:.4rem;background:#fff8ef;border:1px solid #f3d29a;border-radius:8px;padding:.45rem .6rem;font-size:.8rem}
+.resumo-mud{padding-left:1.1rem}
+.resumo-mud li{margin:.2rem 0}
