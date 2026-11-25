@@ -122,21 +122,54 @@ service cloud.firestore {
     function dataValida(dt) {
       return dt is string && dt.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
     }
+    // ---------- Permissões individuais (aba "Gerenciar Permissões") ----------
+    // Para criar uma nova permissão, acrescente o nome nesta lista (e no app.js).
+    function PERMISSOES() {
+      return ['qualquerHorario', 'aprovacaoAutomatica', 'retiradaAteUmDia'];
+    }
+    function temPermissao(p, k) {
+      return p.get('permissoes', {}).get(k, false) == true;
+    }
+    // Prazo: até 9h30 de Brasília do dia da retirada; com "qualquerHorario", até 23h59 desse dia
+    // (00h de Brasília do dia seguinte = data + 27h UTC). Datas passadas nunca são aceitas.
+    function dentroDoPrazo(p, dt) {
+      return request.time < prazoDaData(dt)
+        || (temPermissao(p, 'qualquerHorario') && request.time < prazoDaData(dt) + duration.value(870, 'm'));
+    }
+    // Com "retiradaAteUmDia": retirada somente hoje ou amanhã (Brasília). A data é aceita se
+    // 00h de Brasília da véspera (data − 21h UTC) já passou.
+    function retiradaPermitida(p, dt) {
+      let x = dt.split('-');
+      return !temPermissao(p, 'retiradaAteUmDia')
+        || timestamp.date(int(x[0]), int(x[1]), int(x[2])) - duration.value(1260, 'm') <= request.time;
+    }
+    // Status inicial: "pendente"; com "aprovacaoAutomatica", já como "Pedido Recebido".
+    function statusInicialValido(p, d) {
+      let campos = ['modalidadeId', 'data', 'horarioRetirada', 'quantidade', 'itens', 'usuarioId', 'usuarioNome', 'status', 'baixaNoFornecimento', 'criadoEm'];
+      let camposAuto = ['modalidadeId', 'data', 'horarioRetirada', 'quantidade', 'itens', 'usuarioId', 'usuarioNome', 'status', 'baixaNoFornecimento', 'criadoEm',
+                        'recebidoEm', 'recebidoPorUid', 'recebidoPorNome', 'aprovacaoAutomatica'];
+      return (d.status == 'pendente' && d.keys().hasOnly(campos) && d.keys().hasAll(campos))
+        || (d.status == 'recebido'
+            && temPermissao(p, 'aprovacaoAutomatica')
+            && d.keys().hasOnly(camposAuto) && d.keys().hasAll(camposAuto)
+            && d.recebidoEm == request.time
+            && d.recebidoPorUid == request.auth.uid
+            && d.recebidoPorNome == 'Aprovação automática'
+            && d.aprovacaoAutomatica == true);
+    }
     function solicitacaoValida(solId, d) {
       let p = meuPerfil();
       let limite = get(/databases/$(database)/documents/modalidades/$(p.modalidadeId)).data.limite;
       let ks = d.itens.keys();
-      let campos = ['modalidadeId', 'data', 'horarioRetirada', 'quantidade', 'itens', 'usuarioId', 'usuarioNome', 'status', 'baixaNoFornecimento', 'criadoEm'];
       return p.perfil == 'responsavel'
-        && d.keys().hasOnly(campos)
-        && d.keys().hasAll(campos)
+        && statusInicialValido(p, d)
         && d.modalidadeId == p.modalidadeId
         && dataValida(d.data)
         && solId == p.modalidadeId + '_' + d.data + '_' + string(getAfter(caminhoContador(p.modalidadeId + '_' + d.data)).data.n)
-        && request.time < prazoDaData(d.data)
+        && dentroDoPrazo(p, d.data)
+        && retiradaPermitida(p, d.data)
         && d.usuarioId == request.auth.uid
         && d.usuarioNome == p.nome
-        && d.status == 'pendente'
         && d.baixaNoFornecimento == true
         && d.criadoEm == request.time
         && d.horarioRetirada == '10:00 às 11:00'
@@ -356,6 +389,46 @@ service cloud.firestore {
         && n.get('ultimaBaixaEm', null) == a.get('ultimaBaixaEm', null);
     }
 
+    // ================= Permissões individuais: gravação =================
+    function CAMPOS_PERMISSOES() {
+      return ['permissoes', 'permissoesRegistro', 'permissoesAtualizadasEm', 'permissoesAtualizadasPorUid', 'permissoesAtualizadasPorNome'];
+    }
+    function mapaPermissoesValido(m) {
+      return m is map
+        && m.keys().hasOnly(PERMISSOES())
+        && m.get('qualquerHorario', false) is bool
+        && m.get('aprovacaoAutomatica', false) is bool
+        && m.get('retiradaAteUmDia', false) is bool;
+    }
+    function caminhoAuditoriaPermissoes(id) {
+      return /databases/$(database)/documents/auditoriaPermissoes/$(id);
+    }
+    function permissoesValidas(uid, n) {
+      return n.perfil == 'responsavel'
+        && mapaPermissoesValido(n.permissoes)
+        && n.permissoesRegistro is string
+        && n.permissoesAtualizadasEm == request.time
+        && n.permissoesAtualizadasPorUid == request.auth.uid
+        && n.permissoesAtualizadasPorNome == meuPerfil().nome
+        && existsAfter(caminhoAuditoriaPermissoes(n.permissoesRegistro))
+        && !exists(caminhoAuditoriaPermissoes(n.permissoesRegistro))
+        && getAfter(caminhoAuditoriaPermissoes(n.permissoesRegistro)).data.usuarioId == uid
+        && getAfter(caminhoAuditoriaPermissoes(n.permissoesRegistro)).data.depois == n.permissoes;
+    }
+    function auditoriaPermissoesValida(regId, d) {
+      let campos = ['usuarioId', 'usuarioNome', 'setorId', 'antes', 'depois', 'concedidas', 'retiradas', 'porUid', 'porNome', 'em'];
+      return d.keys().hasOnly(campos) && d.keys().hasAll(campos)
+        && d.usuarioId is string
+        && regId.matches(d.usuarioId + '_[0-9]+')
+        && mapaPermissoesValido(d.antes)
+        && mapaPermissoesValido(d.depois)
+        && d.concedidas is list && d.retiradas is list
+        && d.porUid == request.auth.uid
+        && d.porNome == meuPerfil().nome
+        && d.em == request.time
+        && getAfter(/databases/$(database)/documents/usuarios/$(d.usuarioId)).data.get('permissoesRegistro', '') == regId;
+    }
+
     // ================= Coleções =================
 
     // Perfis: cada pessoa lê o próprio; o Administrador lê todos.
@@ -373,7 +446,11 @@ service cloud.firestore {
                 && request.resource.data.keys().hasOnly(['nome', 'email', 'perfil'])
                 && request.resource.data.nome is string && request.resource.data.nome.size() > 0
                 && request.resource.data.email is string));
-      allow update: if ehAdmin() && request.resource.data.perfil == resource.data.perfil;
+      // Permissões individuais: somente o Administrador altera (o próprio usuário não), sempre
+      // com o registro em auditoriaPermissoes gravado no mesmo lote.
+      allow update: if ehAdmin() && request.resource.data.perfil == resource.data.perfil
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(CAMPOS_PERMISSOES())
+            || permissoesValidas(uid, request.resource.data));
       // Exclusão: somente o Administrador, nunca a própria conta nem contas de Administrador
       // (assim a última conta administrativa nunca é apagada), e sempre com o registro da
       // exclusão gravado no mesmo lote (coleção "exclusoes", para auditoria).
@@ -461,6 +538,13 @@ service cloud.firestore {
         && itemContadorOk(n, antItens, antLegado, sol, ks, 4, setor.limite)
         && itemContadorOk(n, antItens, antLegado, sol, ks, 5, setor.limite);
     }
+    // Registro das alterações de permissões: só o Administrador lê e cria; nunca é alterado nem apagado.
+    match /auditoriaPermissoes/{regId} {
+      allow read: if ehAdmin();
+      allow create: if ehAdmin() && auditoriaPermissoesValida(regId, request.resource.data);
+      allow update, delete: if false;
+    }
+
     match /contadores/{id} {
       allow read: if ehAdmin() || (ehResponsavel() && (resource == null || resource.data.setorId == minhaModalidade()));
       allow create: if logado() && contadorValido(id, request.resource.data, 0, 0, {}, 0);
